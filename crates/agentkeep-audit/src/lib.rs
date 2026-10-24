@@ -4,6 +4,7 @@
 //! design it will implement and the phase in which it lands.
 
 #![forbid(unsafe_code)]
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 /// The crate version, re-exported so the CLI can report component versions.
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
