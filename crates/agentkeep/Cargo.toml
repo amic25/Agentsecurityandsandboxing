@@ -1,0 +1,32 @@
+[package]
+name = "agentkeep"
+description = "A drop-in security layer for AI coding agents: sandbox, egress proxy, MCP gateway, scanner and audit log"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+authors.workspace = true
+categories.workspace = true
+keywords.workspace = true
+readme = "../../README.md"
+default-run = "agentkeep"
+
+[[bin]]
+name = "agentkeep"
+path = "src/main.rs"
+
+[dependencies]
+agentkeep-common = { workspace = true }
+agentkeep-policy = { workspace = true }
+agentkeep-sandbox = { workspace = true }
+agentkeep-proxy = { workspace = true }
+agentkeep-mcp = { workspace = true }
+agentkeep-scan = { workspace = true }
+agentkeep-audit = { workspace = true }
+agentkeep-tui = { workspace = true }
+clap = { workspace = true }
+
+[lints]
+workspace = true

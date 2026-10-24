@@ -1,0 +1,20 @@
+/target
+/fuzz/target
+/fuzz/artifacts
+/fuzz/corpus
+**/*.rs.bk
+*.profraw
+*.profdata
+/book
+/docs/book
+.DS_Store
+/node_modules
+/packaging/npm/node_modules
+/packaging/npm/bin
+__pycache__/
+*.egg-info/
+/dist
+/.idea
+/.vscode
+# Local-only agentkeep state. The real config lives in ~/.config/agentkeep.
+/.agentkeep-local/

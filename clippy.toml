@@ -1,0 +1,2 @@
+# Keep the policy engine and proxy hot paths allocation-light.
+too-many-arguments-threshold = 8
