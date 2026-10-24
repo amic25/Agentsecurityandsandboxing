@@ -1,0 +1,53 @@
+name: Bug report
+description: Something does not work as documented (not a security issue).
+labels: ["bug", "needs-triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        If a sandboxed agent could do something the policy forbids, **stop** and use
+        [private vulnerability reporting](../security/advisories/new) instead.
+  - type: input
+    id: version
+    attributes:
+      label: agentkeep version
+      description: Output of `agentkeep version`
+    validations:
+      required: true
+  - type: dropdown
+    id: backend
+    attributes:
+      label: Backend
+      options: ["linux", "macos", "container (podman)", "container (docker)", "wsl", "not applicable"]
+    validations:
+      required: true
+  - type: input
+    id: os
+    attributes:
+      label: OS and kernel
+      placeholder: "Ubuntu 24.04, 6.8.0; macOS 15.1; Windows 11 + WSL2 Ubuntu"
+    validations:
+      required: true
+  - type: input
+    id: agent
+    attributes:
+      label: Agent and preset
+      placeholder: "claude-code 2.0.x, preset claude-code"
+  - type: textarea
+    id: repro
+    attributes:
+      label: Steps to reproduce
+      description: Include the policy file (redact secrets) and the exact command.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behaviour
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Relevant audit log lines or output
+      render: shell

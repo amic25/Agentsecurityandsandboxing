@@ -1,0 +1,31 @@
+name: Scanner rule proposal
+description: Propose a new detection for `agentkeep scan`, with fixtures.
+labels: ["scanner", "rule", "good first issue"]
+body:
+  - type: input
+    id: title
+    attributes:
+      label: What should it detect?
+    validations:
+      required: true
+  - type: dropdown
+    id: category
+    attributes:
+      label: Category
+      options: ["hidden-unicode", "agent-instructions", "exfiltration", "risky-shell", "over-broad-permissions", "ci-workflow", "other"]
+    validations:
+      required: true
+  - type: textarea
+    id: positive
+    attributes:
+      label: Examples that should match (benign, fake secrets only)
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: negative
+    attributes:
+      label: Examples that must not match
+      render: text
+    validations:
+      required: true

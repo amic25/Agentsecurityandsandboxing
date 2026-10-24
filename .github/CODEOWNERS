@@ -1,0 +1,9 @@
+# Security-sensitive paths require review from the maintainers.
+*                         @amic25
+/crates/agentkeep-sandbox/ @amic25
+/crates/agentkeep-proxy/   @amic25
+/crates/agentkeep-policy/  @amic25
+/.github/                  @amic25
+/deny.toml                 @amic25
+/SECURITY.md               @amic25
+/docs/threat-model.md      @amic25

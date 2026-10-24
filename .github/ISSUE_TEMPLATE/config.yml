@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/amic25/Agentsecurityandsandboxing/security/advisories/new
+    about: Sandbox escapes, policy bypasses and DLP bypasses go here, privately. Never in a public issue.
+  - name: Questions and ideas
+    url: https://github.com/amic25/Agentsecurityandsandboxing/discussions
+    about: Ask how to configure agentkeep or discuss a feature before opening an issue.

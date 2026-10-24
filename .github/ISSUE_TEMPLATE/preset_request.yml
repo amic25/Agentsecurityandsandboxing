@@ -1,0 +1,27 @@
+name: Agent preset request
+description: Ask for, or offer, a preset for an agent that is not supported yet.
+labels: ["preset", "good first issue"]
+body:
+  - type: input
+    id: agent
+    attributes:
+      label: Agent name and link
+    validations:
+      required: true
+  - type: textarea
+    id: domains
+    attributes:
+      label: Domains it needs to reach
+      description: Model APIs, package registries, update servers. Be specific.
+    validations:
+      required: true
+  - type: textarea
+    id: paths
+    attributes:
+      label: Config and state paths
+      description: Which directories must be read-write (its config, cache, session store)?
+  - type: textarea
+    id: quirks
+    attributes:
+      label: Known quirks
+      description: Does it honour HTTP_PROXY? Does it pin TLS certificates? Does it need /dev/tty?

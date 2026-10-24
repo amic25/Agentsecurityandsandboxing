@@ -1,0 +1,55 @@
+# Synchronise with: scripts/sync-labels.sh (requires the gh CLI)
+- name: bug
+  color: d73a4a
+  description: Something is broken
+- name: enhancement
+  color: a2eeef
+  description: New feature or request
+- name: security
+  color: b60205
+  description: Security-relevant change (not for reporting vulnerabilities)
+- name: good first issue
+  color: 7057ff
+  description: Well scoped, documented, and suitable for a first contribution
+- name: help wanted
+  color: 008672
+  description: Maintainers would welcome a PR
+- name: needs-triage
+  color: ededed
+  description: Not yet reviewed by a maintainer
+- name: preset
+  color: 0e8a16
+  description: Agent presets under presets/
+- name: scanner
+  color: 1d76db
+  description: The static scanner and its rules
+- name: rule
+  color: 5319e7
+  description: A scanner rule under rules/
+- name: backend/linux
+  color: fbca04
+  description: Linux namespaces, Landlock, seccomp
+- name: backend/macos
+  color: fbca04
+  description: macOS Seatbelt
+- name: backend/container
+  color: fbca04
+  description: Podman, Docker, gVisor
+- name: backend/wsl
+  color: fbca04
+  description: Windows and WSL2
+- name: proxy
+  color: c2e0c6
+  description: Egress proxy and DLP
+- name: mcp-gateway
+  color: c2e0c6
+  description: MCP gateway
+- name: audit-log
+  color: c2e0c6
+  description: Audit log, TUI and reports
+- name: docs
+  color: 0075ca
+  description: Documentation
+- name: dependencies
+  color: 0366d6
+  description: Dependency updates

@@ -1,0 +1,26 @@
+name: Feature request
+description: Propose a change to agentkeep.
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: What problem does this solve?
+      description: Describe the situation, not the solution, first.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed change
+  - type: textarea
+    id: threat
+    attributes:
+      label: Threat-model impact
+      description: Does this add, remove or change a protection? See docs/threat-model.md.
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: Scope check
+      options:
+        - label: This is not a hosted service, GUI app or claim of perfect protection (non-goals for v1).
