@@ -34,6 +34,17 @@ pub struct Cli {
     pub command: Command,
 }
 
+/// Global options, passed to every command.
+#[derive(Debug, Clone)]
+pub struct Globals {
+    /// Explicit policy file.
+    pub policy: Option<PathBuf>,
+    /// Verbosity.
+    pub verbose: u8,
+    /// Deny instead of prompting.
+    pub no_ask: bool,
+}
+
 /// Top-level commands. The order here is the order in `--help`.
 #[derive(Debug, Subcommand)]
 pub enum Command {
@@ -65,6 +76,10 @@ pub enum Command {
     /// Attach to a running session to answer approval prompts.
     Approve(ApproveArgs),
 
+    /// Probe the sandbox backends available on this host and report what
+    /// each can enforce.
+    Doctor,
+
     /// Print version information for the binary and each component.
     Version,
 }
@@ -80,6 +95,7 @@ impl Command {
             Command::Log(_) => "log",
             Command::Report(_) => "report",
             Command::Approve(_) => "approve",
+            Command::Doctor => "doctor",
             Command::Version => "version",
         }
     }
@@ -87,7 +103,9 @@ impl Command {
     /// The phase of `PLAN.md` in which the command is scheduled to land.
     pub fn phase(&self) -> &'static str {
         match self {
-            Command::Run(_) | Command::Policy(_) | Command::Approve(_) => "Phase 1",
+            Command::Run(_) | Command::Policy(_) | Command::Approve(_) | Command::Doctor => {
+                "Phase 1"
+            }
             Command::Scan(_) => "Phase 3",
             Command::McpGateway(_) => "Phase 4",
             Command::Log(_) | Command::Report(_) => "Phase 5",
@@ -138,6 +156,18 @@ pub enum BackendChoice {
     Container,
     /// Windows: re-run inside WSL2 using the Linux backend.
     Wsl,
+}
+
+impl BackendChoice {
+    /// The name used in policy files.
+    pub fn policy_name(self) -> &'static str {
+        match self {
+            Self::Linux => "linux",
+            Self::Macos => "macos",
+            Self::Container => "container",
+            Self::Wsl => "wsl",
+        }
+    }
 }
 
 /// Subcommands of `agentkeep policy`.
@@ -275,8 +305,8 @@ pub enum ReportFormat {
 /// Arguments for `agentkeep approve`.
 #[derive(Debug, Args)]
 pub struct ApproveArgs {
-    /// Session id to attach to. Defaults to the only running session.
-    pub session: Option<String>,
+    /// Path of the approval socket printed by `agentkeep run`.
+    pub socket: PathBuf,
 }
 
 #[cfg(test)]

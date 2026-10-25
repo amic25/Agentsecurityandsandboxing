@@ -18,15 +18,23 @@ name = "agentkeep"
 path = "src/main.rs"
 
 [dependencies]
-agentkeep-common = { workspace = true }
-agentkeep-policy = { workspace = true }
-agentkeep-sandbox = { workspace = true }
-agentkeep-proxy = { workspace = true }
-agentkeep-mcp = { workspace = true }
-agentkeep-scan = { workspace = true }
 agentkeep-audit = { workspace = true }
+agentkeep-common = { workspace = true }
+agentkeep-mcp = { workspace = true }
+agentkeep-policy = { workspace = true }
+agentkeep-proxy = { workspace = true }
+agentkeep-sandbox = { workspace = true }
+agentkeep-scan = { workspace = true }
 agentkeep-tui = { workspace = true }
+anyhow = { workspace = true }
 clap = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tempfile = { workspace = true }
+toml = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
 
 [lints]
 workspace = true
