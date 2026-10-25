@@ -68,9 +68,16 @@ pub fn load_file(path: &Path, source: Source) -> Result<Layer, LoadError> {
         source: e,
     })?;
     let file = parse_str(&text, &path.display().to_string())?;
+    // A relative file name has an empty parent; relative `project` entries
+    // must still resolve against the directory the file is in.
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir().map_or_else(|_| path.to_path_buf(), |cwd| cwd.join(path))
+    };
     Ok(Layer {
         source,
-        base_dir: path.parent().map(Path::to_path_buf),
+        base_dir: abs.parent().map(Path::to_path_buf),
         file,
     })
 }
