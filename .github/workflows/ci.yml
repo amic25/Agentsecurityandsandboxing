@@ -68,8 +68,23 @@ jobs:
         with:
           toolchain: ${{ steps.toolchain.outputs.channel }}
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Allow unprivileged user namespaces (Ubuntu runners restrict them)
+        if: runner.os == 'Linux'
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
       - run: cargo build --workspace --locked
-      - run: cargo test --workspace --locked
+      - name: Unit, property and escape tests
+        shell: bash
+        env:
+          # On Linux the sandbox must actually be exercised; UNTESTED is a failure.
+          AGENTKEEP_REQUIRE_SANDBOX: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: cargo test --workspace --locked -- --nocapture
+      - name: Escape suite summary
+        if: runner.os != 'Windows'
+        env:
+          AGENTKEEP_REQUIRE_SANDBOX: ${{ runner.os == 'Linux' && '1' || '' }}
+        run: tests/escape/run.sh
       - name: Smoke-test the binary
         shell: bash
         run: |
