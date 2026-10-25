@@ -55,6 +55,15 @@ pub fn normalize(path: &Path) -> PathBuf {
     out
 }
 
+/// True when `path` is absolute in the POSIX sense: it starts at the root.
+///
+/// Policy paths describe the sandbox, which is always a POSIX tree (on
+/// Windows, inside WSL2), so `/home/u` counts as absolute on every host even
+/// though `std` on Windows wants a drive letter.
+pub fn is_absolute_posix(path: &Path) -> bool {
+    path.has_root() || path.is_absolute()
+}
+
 /// True when `path` is `base` or lies underneath it. Both are compared
 /// lexically after normalisation; neither is required to exist.
 pub fn is_within(path: &Path, base: &Path) -> bool {

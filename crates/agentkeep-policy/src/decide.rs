@@ -363,7 +363,7 @@ pub fn command_line(argv: &[String]) -> String {
     parts.join(" ")
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))] // fixtures use POSIX paths
 mod tests {
     use super::*;
     use crate::parse_str;

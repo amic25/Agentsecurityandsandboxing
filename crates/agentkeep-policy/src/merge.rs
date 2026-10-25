@@ -319,6 +319,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)] // POSIX path fixture
     fn relative_project_resolves_against_layer_dir() {
         let (m, _) = merge(&[Layer {
             source: Source::Project(PathBuf::from("/x/y/agentkeep.toml")),

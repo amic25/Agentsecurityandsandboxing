@@ -206,13 +206,13 @@ impl Policy {
         let project_raw = fs.project.as_deref().unwrap_or(".");
         let project = {
             let p = paths::expand(project_raw, &ctx.home, &ctx.base_dir);
-            if p.is_absolute() {
+            if paths::is_absolute_posix(&p) {
                 p
             } else {
                 paths::normalize(&ctx.base_dir.join(p))
             }
         };
-        if !project.is_absolute() {
+        if !paths::is_absolute_posix(&project) {
             return Err(ResolveError::invalid(
                 "filesystem.project",
                 "must resolve to an absolute path",
@@ -225,7 +225,7 @@ impl Policy {
                     return Err(ResolveError::invalid(field, "empty path"));
                 }
                 let p = paths::expand(raw, &ctx.home, &project);
-                if !p.is_absolute() {
+                if !paths::is_absolute_posix(&p) {
                     return Err(ResolveError::invalid(
                         field,
                         format!("`{raw}` must be absolute or start with ~ or $PROJECT"),
@@ -465,7 +465,7 @@ fn validate_host_pattern(field: &str, host: &str) -> Result<(), ResolveError> {
     Ok(())
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))] // fixtures use POSIX paths
 mod tests {
     use super::*;
     use crate::parse_str;

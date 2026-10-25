@@ -98,6 +98,8 @@ network inside the sandbox at all until Phase 2 adds the proxy.
 - agentkeep on Windows re-executes inside WSL2 and uses the Linux backend
   there. Native Windows sandboxing (AppContainer, Windows Sandbox) is not
   implemented.
+- Policy paths are POSIX paths describing the sandbox tree. On Windows
+  they refer to paths inside WSL2; drive-letter paths are not accepted.
 - `/mnt/c` and other drive mounts are visible inside WSL2 by default and must
   be hidden by the policy; the Windows preset does this, but a custom policy
   that removes it exposes the Windows filesystem.
