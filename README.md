@@ -7,9 +7,14 @@ agentkeep is a drop-in security layer for AI coding and personal agents
 (Claude Code, Codex CLI, OpenCode, Gemini CLI, Cline, Goose and others). One
 static binary, one policy file, the same rules on every agent and every OS.
 
-> **Status: pre-alpha, Phase 0.** The repository skeleton, CI and threat model
-> exist. **No sandboxing is implemented yet.** Do not rely on it. Follow
-> `PLAN.md` for what lands when, and `CHANGELOG.md` for what has landed.
+> **Status: pre-alpha, Phase 1.** `agentkeep run` sandboxes a command on
+> Linux (namespaces, Landlock, seccomp) with an escape suite behind it, and
+> the policy engine, approval prompts and audit log work. **There is no
+> network inside the sandbox yet**: the egress proxy that lets allowed
+> domains through is Phase 2, so an agent cannot reach its model API from
+> inside `agentkeep run` today. macOS and container backends, the scanner,
+> the MCP gateway and the log viewer are not implemented. Follow `PLAN.md`
+> for what lands when, and `CHANGELOG.md` for what has landed.
 
 <!-- demo GIF lands in Phase 6: an injected README tries to steal ~/.ssh and agentkeep blocks it -->
 
@@ -35,6 +40,19 @@ deny-by-default filesystem, environment, network and MCP controls.
 | `agentkeep mcp-gateway` | Proxy between the agent and its MCP servers: tool allowlists, per-argument rules, version and hash pinning with rug-pull detection, untrusted-output marking, full logging. |
 | `agentkeep scan` | Static scanner for agent attack surfaces: hidden Unicode, instructions aimed at agents, exfiltration beacons, `curl \| sh`, over-broad permissions, unsafe CI workflows. Text, JSON and SARIF output, plus a GitHub Action. |
 | `agentkeep log` / `report` | Append-only, hash-chained audit log of every command, write, request, MCP call and policy decision, with a terminal viewer and shareable reports. |
+
+## Try it today (Linux)
+
+```sh
+cargo build --release
+cd your-project
+./target/release/agentkeep doctor                 # what this host can enforce
+./target/release/agentkeep policy init --defaults # commented agentkeep.toml
+./target/release/agentkeep run -- sh              # a shell that sees only the project
+cat ~/.ssh/id_ed25519                             # inside: No such file or directory
+```
+
+Every session writes `~/.local/share/agentkeep/sessions/<id>/events.jsonl`.
 
 ## Install
 

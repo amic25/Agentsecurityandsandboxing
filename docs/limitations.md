@@ -5,8 +5,11 @@ missing, partial or backend-specific, it is listed here. Please keep it
 current: a limitation that is fixed is removed with the PR that fixes it, and
 a new gap is added with the PR that discovers it.
 
-Status: **Phase 0**. No sandboxing is implemented yet. Every command except
-`agentkeep version` exits with status 70 ("not implemented").
+Status: **Phase 1**. `agentkeep run` works on Linux with the namespaces
+backend; `policy init|show|check`, `doctor` and `approve` work everywhere
+the binary builds. The proxy (`network` rules), `scan`, `mcp-gateway`, `log`
+and `report` are not implemented yet and exit with status 70. There is no
+network inside the sandbox at all until Phase 2 adds the proxy.
 
 ## General
 
@@ -21,8 +24,21 @@ Status: **Phase 0**. No sandboxing is implemented yet. Every command except
   boundary. Linux may gain enforced command rules through seccomp user
   notification in Phase 1.
 - No disk quota. An agent can fill the disk inside the project directory.
+- **Phase 1: no network at all.** The sandbox has only a loopback interface
+  and no DNS. The egress proxy that lets allowed domains through lands in
+  Phase 2. Until then an agent cannot reach its model API from inside
+  `agentkeep run`.
 - Tools that ignore `HTTP_PROXY`/`HTTPS_PROXY` have no network inside the
   sandbox. This is fail-closed by design. Presets list known offenders.
+- `[network]` rules are parsed and validated but not enforced until Phase 2.
+- Agent presets (`--preset`) land in Phase 5; `run` refuses the flag until
+  then.
+- The approval prompt reads from `/dev/tty`, the same terminal the agent's
+  own UI reads from. While a prompt is open, a keystroke may go to either.
+  `agentkeep approve <socket>` from a second terminal avoids this.
+- The audit log records `exec` events only for shimmed commands (those named
+  by `[commands]` rules), not every process. Full process accounting is a
+  Phase 5 item.
 - TLS inspection breaks clients that pin certificates. Those hosts go in
   `network.passthrough`, where they get allowlist control but no DLP.
 
@@ -35,9 +51,22 @@ Status: **Phase 0**. No sandboxing is implemented yet. Every command except
 - Landlock needs kernel 5.13+. TCP restriction (Landlock ABI 4) needs 6.7+.
   Older kernels get mount-namespace isolation only; the capability table
   shows which layers are active.
-- cgroup limits need cgroup v2 with delegation to the user's session (normal
-  under systemd). Without it, `limits.memory` falls back to `RLIMIT_AS` and
-  `limits.pids` cannot be enforced.
+- cgroup limits need a writable cgroup v2 directory for the agentkeep
+  process *and* permission to enable controllers for a child cgroup. Under a
+  systemd user session the leaf scope usually contains other processes, so
+  enabling controllers fails and agentkeep falls back to rlimits:
+  `RLIMIT_AS` for memory (address space, not resident memory, so programs
+  that reserve large virtual ranges may fail earlier than expected) and
+  `RLIMIT_NPROC` for pids (per user namespace on Linux 5.14+). `cpu_percent`
+  is not enforced without cgroups. `agentkeep doctor` reports which path is
+  active. A `systemd-run --scope` integration is planned.
+- Hidden *files* (as opposed to directories) under a visible tree are
+  covered with an empty read-only file. A process can see that the path
+  exists, just not its contents.
+- The sandbox's `/etc` is the host's `/etc` read-only, with `passwd`, `group`,
+  `shadow`, `gshadow`, `sudoers`, SSH host keys, Docker and Kubernetes
+  configs replaced or hidden. Other host-specific files in `/etc` remain
+  readable.
 
 ## macOS backend
 
