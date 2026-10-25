@@ -3,12 +3,19 @@
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
+// Most of the CLI drives the Unix sandbox; on other platforms it is
+// deliberately unreachable until their backends land.
+#![cfg_attr(not(unix), allow(dead_code))]
 
+#[cfg(unix)]
 mod approval;
 mod cli;
+mod doctor;
 mod load;
 mod policy_cmd;
+#[cfg(unix)]
 mod run;
+#[cfg(target_os = "linux")]
 mod shim;
 mod ui;
 
@@ -25,29 +32,34 @@ use crate::cli::{Cli, Command};
 const EXIT_NOT_IMPLEMENTED: u8 = 70;
 
 fn main() -> ExitCode {
-    let raw: Vec<String> = std::env::args().collect();
-
-    // Started through a command shim inside a sandbox?
     #[cfg(target_os = "linux")]
-    if let Some(name) = raw
-        .first()
-        .and_then(|a| agentkeep_sandbox::linux::invoked_as_shim(a))
     {
-        return shim::main(&name, &raw[1..]);
-    }
+        let raw: Vec<String> = std::env::args().collect();
 
-    // The sandbox init process. Parsed by hand: it must not depend on the
-    // full CLI, and its arguments are fds chosen by the supervisor.
-    #[cfg(target_os = "linux")]
-    if raw.get(1).map(String::as_str) == Some("__init") {
-        let fd = |flag: &str| -> i32 {
-            raw.iter()
-                .position(|a| a == flag)
-                .and_then(|i| raw.get(i + 1))
-                .and_then(|v| v.parse().ok())
-                .unwrap_or(-1)
-        };
-        agentkeep_sandbox::linux::init::main(fd("--plan-fd"), fd("--sync-fd"), fd("--status-fd"));
+        // Started through a command shim inside a sandbox?
+        if let Some(name) = raw
+            .first()
+            .and_then(|a| agentkeep_sandbox::linux::invoked_as_shim(a))
+        {
+            return shim::main(&name, &raw[1..]);
+        }
+
+        // The sandbox init process. Parsed by hand: it must not depend on
+        // the full CLI, and its arguments are fds chosen by the supervisor.
+        if raw.get(1).map(String::as_str) == Some("__init") {
+            let fd = |flag: &str| -> i32 {
+                raw.iter()
+                    .position(|a| a == flag)
+                    .and_then(|i| raw.get(i + 1))
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(-1)
+            };
+            agentkeep_sandbox::linux::init::main(
+                fd("--plan-fd"),
+                fd("--sync-fd"),
+                fd("--status-fd"),
+            );
+        }
     }
 
     let cli = Cli::parse();
@@ -71,10 +83,19 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             print_version();
             Ok(ExitCode::SUCCESS)
         }
+        #[cfg(unix)]
         Command::Run(args) => run::run(&globals, &args),
-        Command::Policy(cmd) => policy_cmd::run(&globals, cmd),
+        #[cfg(unix)]
         Command::Approve(args) => approval::approve_client(&globals, &args),
-        Command::Doctor => run::doctor(),
+        #[cfg(not(unix))]
+        Command::Run(_) | Command::Approve(_) => {
+            ui::error(
+                "no sandbox backend on this platform yet; Windows support runs through WSL2 and lands in Phase 2",
+            );
+            Ok(ExitCode::from(doctor::EXIT_NO_BACKEND))
+        }
+        Command::Policy(cmd) => policy_cmd::run(&globals, cmd),
+        Command::Doctor => doctor::run(),
         other => {
             ui::error(&format!(
                 "`{}` is not implemented yet (planned for {}). See PLAN.md.",

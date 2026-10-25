@@ -17,8 +17,7 @@ use crate::cli::{Globals, RunArgs};
 use crate::load::{self, Host, Loaded};
 use crate::ui;
 
-/// Exit code when no sandbox backend is available.
-const EXIT_NO_BACKEND: u8 = 3;
+use crate::doctor::EXIT_NO_BACKEND;
 
 /// Inside-sandbox locations.
 const SHIM_DIR: &str = "/run/agentkeep/bin";
@@ -359,35 +358,4 @@ fn build_plan(
         inner_uid: agentkeep_sandbox::linux_inner_uid(),
         inner_gid: agentkeep_sandbox::linux_inner_uid(),
     })
-}
-
-/// `agentkeep doctor`.
-pub fn doctor() -> Result<ExitCode> {
-    let mut any = false;
-    for b in agentkeep_sandbox::backends() {
-        match b.probe() {
-            agentkeep_sandbox::Probe::Available {
-                capabilities,
-                degradations,
-            } => {
-                any = true;
-                println!("{}: available", b.name());
-                println!("{}", serde_json::to_string_pretty(&capabilities)?);
-                for d in degradations {
-                    println!(
-                        "  degraded: {} ({}); fallback: {}",
-                        d.control, d.reason, d.fallback
-                    );
-                }
-            }
-            agentkeep_sandbox::Probe::Unavailable { reason } => {
-                println!("{}: unavailable: {reason}", b.name());
-            }
-        }
-    }
-    if !any {
-        println!("no backend available (macOS and container backends land in Phase 2)");
-        return Ok(ExitCode::from(EXIT_NO_BACKEND));
-    }
-    Ok(ExitCode::SUCCESS)
 }
