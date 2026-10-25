@@ -12,6 +12,12 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+/// True when CI demands that the sandbox really runs. An empty value counts
+/// as unset so a matrix expression can clear it on other platforms.
+fn require_sandbox() -> bool {
+    std::env::var("AGENTKEEP_REQUIRE_SANDBOX").is_ok_and(|v| !v.trim().is_empty())
+}
+
 #[cfg(unix)]
 mod suite {
     use std::fs;
@@ -19,6 +25,8 @@ mod suite {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
     use std::sync::OnceLock;
+
+    use super::require_sandbox;
 
     const FAKE_SSH_KEY: &str = "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE_TEST_KEY_NOT_REAL_agentkeep_escape_suite\n-----END OPENSSH PRIVATE KEY-----\n";
     const FAKE_AWS: &str = "[default]\naws_access_key_id = AKIA_TEST_FAKE_NOT_REAL\naws_secret_access_key = FAKE_TEST_SECRET_agentkeep\n";
@@ -128,7 +136,7 @@ mod suite {
                 println!("{msg}");
                 eprintln!("{msg}");
                 assert!(
-                    std::env::var_os("AGENTKEEP_REQUIRE_SANDBOX").is_none(),
+                    !require_sandbox(),
                     "AGENTKEEP_REQUIRE_SANDBOX is set but the sandbox is unavailable: {reason}"
                 );
                 None
@@ -221,7 +229,7 @@ mod suite {
         let Some(h) = harness("F5") else { return };
         if !has("python3") {
             println!("UNTESTED [F5]: python3 missing");
-            assert!(std::env::var_os("AGENTKEEP_REQUIRE_SANDBOX").is_none());
+            assert!(!require_sandbox());
             return;
         }
         let o = h.run(
@@ -369,7 +377,7 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
         let Some(h) = harness("C4") else { return };
         if !has("python3") {
             println!("UNTESTED [C4]: python3 missing");
-            assert!(std::env::var_os("AGENTKEEP_REQUIRE_SANDBOX").is_none());
+            assert!(!require_sandbox());
             return;
         }
         let o = h.run(
@@ -525,5 +533,5 @@ fn untested_on_this_host() {
     println!(
         "UNTESTED ON THIS HOST: the escape suite runs on Unix only; Windows uses WSL2 (Phase 2)"
     );
-    assert!(std::env::var_os("AGENTKEEP_REQUIRE_SANDBOX").is_none());
+    assert!(!require_sandbox());
 }
