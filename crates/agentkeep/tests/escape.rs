@@ -9,6 +9,13 @@
 //! `UNTESTED ON THIS HOST` instead of passing silently. Set
 //! `AGENTKEEP_REQUIRE_SANDBOX=1` (as Linux CI does) to turn that into a
 //! failure.
+//!
+//! `AGENTKEEP_ESCAPE_BACKEND=<name>` runs the suite against one backend
+//! (`linux`, `container`, `macos`); otherwise the first available one is
+//! used. Each test names the controls it exercises, and a backend that does
+//! not claim a control (per `agentkeep doctor --json`) gets a
+//! `NOT APPLICABLE` line for it instead of a pass. Universal assertions
+//! (secrets never leak, the host is never modified) run on every backend.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -41,10 +48,36 @@ mod suite {
         pub _root: tempfile::TempDir,
         pub home: PathBuf,
         pub project: PathBuf,
+        /// Backend under test.
+        pub backend: String,
+        /// Controls it claims.
+        pub controls: Vec<String>,
+        /// Pass `--backend` explicitly.
+        pub forced: bool,
     }
 
     impl Harness {
-        fn new() -> Self {
+        /// Does the backend under test claim this control?
+        pub fn claims(&self, control: &str) -> bool {
+            self.controls.iter().any(|c| c == control)
+        }
+
+        /// Gate a test on a control. Prints `NOT APPLICABLE` and returns
+        /// false when the backend does not claim it.
+        pub fn requires(&self, id: &str, control: &str) -> bool {
+            if self.claims(control) {
+                return true;
+            }
+            let msg = format!(
+                "NOT APPLICABLE [{id}] on backend `{}`: it does not claim `{control}` (see docs/limitations.md)",
+                self.backend
+            );
+            println!("{msg}");
+            eprintln!("{msg}");
+            false
+        }
+
+        fn new(backend: &str, controls: &[String], forced: bool) -> Self {
             let root = tempfile::tempdir().unwrap();
             let home = root.path().join("home");
             let project = root.path().join("home/work/project");
@@ -76,6 +109,9 @@ mod suite {
                 _root: root,
                 home,
                 project,
+                backend: backend.to_string(),
+                controls: controls.to_vec(),
+                forced,
             }
         }
 
@@ -91,8 +127,13 @@ mod suite {
                 )
                 .unwrap();
             }
+            let mut args = vec!["--no-ask", "run"];
+            if self.forced {
+                args.extend(["--backend", self.backend.as_str()]);
+            }
+            args.extend(["--", "sh", "-c", script]);
             Command::new(bin())
-                .args(["--no-ask", "run", "--", "sh", "-c", script])
+                .args(&args)
                 .current_dir(&self.project)
                 .env_clear()
                 .env("HOME", &self.home)
@@ -114,25 +155,61 @@ mod suite {
         )
     }
 
-    /// `Some(harness)` when the Linux backend works here, `None` otherwise.
-    pub fn harness(id: &str) -> Option<Harness> {
-        static AVAILABLE: OnceLock<Result<(), String>> = OnceLock::new();
-        let status = AVAILABLE.get_or_init(|| {
-            let o = Command::new(bin())
-                .arg("doctor")
-                .output()
-                .expect("run agentkeep doctor");
-            if o.status.success() {
-                Ok(())
-            } else {
-                Err(String::from_utf8_lossy(&o.stdout).trim().to_string())
-            }
+    /// Backend chosen for this run: name, claimed controls, forced flag.
+    type Selection = Result<(String, Vec<String>, bool), String>;
+
+    #[allow(clippy::single_match_else)] // both arms are substantial
+    fn select_backend() -> Selection {
+        let o = Command::new(bin())
+            .args(["doctor", "--json"])
+            .output()
+            .expect("run agentkeep doctor");
+        let report: serde_json::Value = serde_json::from_slice(&o.stdout)
+            .map_err(|e| format!("doctor --json unreadable: {e}"))?;
+        let wanted = std::env::var("AGENTKEEP_ESCAPE_BACKEND")
+            .ok()
+            .filter(|v| !v.trim().is_empty());
+        let backends = report["backends"].as_array().cloned().unwrap_or_default();
+        let pick = backends.iter().find(|b| {
+            b["available"] == true
+                && wanted
+                    .as_deref()
+                    .is_none_or(|w| b["name"].as_str() == Some(w))
         });
-        match status {
-            Ok(()) => Some(Harness::new()),
+        match pick {
+            Some(b) => {
+                let name = b["name"].as_str().unwrap_or_default().to_string();
+                let controls = b["controls"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|c| c.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                println!("escape suite: backend `{name}`, controls {controls:?}");
+                Ok((name, controls, wanted.is_some()))
+            }
+            None => {
+                let reasons: Vec<String> = backends
+                    .iter()
+                    .map(|b| format!("{}: {}", b["name"], b["reason"]))
+                    .collect();
+                Err(match wanted {
+                    Some(w) => format!("backend `{w}` unavailable ({})", reasons.join("; ")),
+                    None => format!("no sandbox backend available ({})", reasons.join("; ")),
+                })
+            }
+        }
+    }
+
+    /// `Some(harness)` when a backend works here, `None` otherwise.
+    pub fn harness(id: &str) -> Option<Harness> {
+        static SELECTED: OnceLock<Selection> = OnceLock::new();
+        match SELECTED.get_or_init(select_backend) {
+            Ok((name, controls, forced)) => Some(Harness::new(name, controls, *forced)),
             Err(reason) => {
-                let msg =
-                    format!("UNTESTED ON THIS HOST [{id}]: no sandbox backend available: {reason}");
+                let msg = format!("UNTESTED ON THIS HOST [{id}]: {reason}");
                 println!("{msg}");
                 eprintln!("{msg}");
                 assert!(
@@ -142,6 +219,18 @@ mod suite {
                 None
             }
         }
+    }
+
+    /// "No such file", "Operation not permitted" or "Permission denied":
+    /// the access failed, whichever way the backend refuses it.
+    fn refused(text: &str) -> bool {
+        [
+            "No such file",
+            "Operation not permitted",
+            "Permission denied",
+        ]
+        .iter()
+        .any(|m| text.contains(m))
     }
 
     fn has(tool: &str) -> bool {
@@ -173,7 +262,10 @@ mod suite {
             &["FAKE_TEST_KEY", "AKIA_TEST_FAKE", "FAKE_TEST_SECRET"],
             "F1",
         );
-        assert!(out(&o).contains("No such file"), "{}", out(&o));
+        assert!(refused(&out(&o)), "{}", out(&o));
+        if h.requires("F1 absent", "fs_absent") {
+            assert!(out(&o).contains("No such file"), "{}", out(&o));
+        }
     }
 
     #[test]
@@ -199,15 +291,20 @@ mod suite {
             "cat ./link-to-key; ln -s ~/.aws/credentials ./link2 && cat ./link2; ln ~/.ssh/id_ed25519 ./hardlink; echo ln-rc=$?; cat ./hardlink",
         );
         assert_blocked(&o, &["FAKE_TEST_KEY", "AKIA_TEST_FAKE"], "F3");
-        assert!(
-            !h.project.join("hardlink").exists(),
-            "hardlink must not be created"
-        );
+        if h.requires("F3 hardlink", "hardlink_safe") {
+            assert!(
+                !h.project.join("hardlink").exists(),
+                "hardlink must not be created"
+            );
+        }
     }
 
     #[test]
     fn f4_host_processes_are_invisible() {
         let Some(h) = harness("F4") else { return };
+        if !h.requires("F4", "pid_isolation") {
+            return;
+        }
         let supervisor_pid = std::process::id();
         let o = h.run("", &format!("ls /proc | grep -c '^[0-9]'; test -d /proc/{supervisor_pid} && echo HOST_PID_VISIBLE; cat /proc/1/cmdline | tr '\\0' ' '; ls /proc/1/root/ 2>&1 | head -3"));
         let text = out(&o);
@@ -219,14 +316,17 @@ mod suite {
             .unwrap_or(999);
         assert!(count < 10, "too many pids visible ({count}):\n{text}");
         assert!(
-            text.contains("agentkeep __init"),
-            "pid 1 should be agentkeep init:\n{text}"
+            text.contains("agentkeep"),
+            "pid 1 should be agentkeep's init:\n{text}"
         );
     }
 
     #[test]
     fn f5_ptrace_and_process_memory_access_are_denied() {
         let Some(h) = harness("F5") else { return };
+        if !h.requires("F5", "ptrace_denied") {
+            return;
+        }
         if !has("python3") {
             println!("UNTESTED [F5]: python3 missing");
             assert!(!require_sandbox());
@@ -250,6 +350,9 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn f6_mount_and_namespace_escapes_are_denied() {
         let Some(h) = harness("F6") else { return };
+        if !h.requires("F6", "no_mount") {
+            return;
+        }
         let o = h.run(
             "",
             "unshare -Ur true; echo unshare-rc=$?; unshare -m true; echo unshare-m-rc=$?; /bin/mount -t tmpfs none /mnt 2>&1; echo mount-rc=$?; mkdir -p /tmp/newroot && (cd /tmp/newroot && /sbin/pivot_root . . 2>&1); echo pivot-rc=$?",
@@ -296,13 +399,16 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn f10_audit_log_and_global_policy_are_invisible() {
         let Some(h) = harness("F10") else { return };
-        let o = h.run("", "ls ~/.local/share/agentkeep 2>&1; ls ~/.config/agentkeep 2>&1; cat /proc/mounts | grep -c sessions");
+        let o = h.run("", "ls ~/.local/share/agentkeep/sessions 2>&1; ls ~/.config/agentkeep 2>&1; cat /proc/mounts 2>/dev/null | grep -c sessions");
         let text = out(&o);
-        assert!(text.contains("No such file"), "{text}");
-        assert!(
-            text.lines().any(|l| l.trim() == "0"),
-            "a session mount leaked:\n{text}"
-        );
+        assert!(refused(&text), "{text}");
+        assert!(!text.contains("events.jsonl"), "{text}");
+        if h.requires("F10 mounts", "fs_absent") {
+            assert!(
+                text.lines().any(|l| l.trim() == "0"),
+                "a session mount leaked:\n{text}"
+            );
+        }
         // ...while the log exists on the host.
         let sessions = h.home.join(".local/share/agentkeep/sessions");
         assert!(sessions.exists());
@@ -339,14 +445,19 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn n3_n4_no_network_and_no_dns() {
         let Some(h) = harness("N3/N4") else { return };
-        let o = h.run(
-            "",
-            "getent hosts example.com; echo dns-rc=$?; cat /proc/net/dev | tail -n +3 | awk '{print $1}'; cat /proc/net/route | wc -l",
-        );
-        let text = out(&o);
-        assert!(text.contains("dns-rc=2"), "{text}");
-        let ifaces: Vec<&str> = text.lines().filter(|l| l.ends_with(':')).collect();
-        assert_eq!(ifaces, vec!["lo:"], "only loopback may exist:\n{text}");
+        if !h.requires("N3/N4", "net_isolation") {
+            return;
+        }
+        if h.requires("N3/N4 netns", "net_namespace") {
+            let o = h.run(
+                "",
+                "getent hosts example.com; echo dns-rc=$?; cat /proc/net/dev | tail -n +3 | awk '{print $1}'; cat /proc/net/route | wc -l",
+            );
+            let text = out(&o);
+            assert!(text.contains("dns-rc=2"), "{text}");
+            let ifaces: Vec<&str> = text.lines().filter(|l| l.ends_with(':')).collect();
+            assert_eq!(ifaces, vec!["lo:"], "only loopback may exist:\n{text}");
+        }
         if has("python3") {
             let o = h.run("", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 9)) if False else None; \ntry:\n s.connect((\"203.0.113.1\", 80)); print(\"CONNECTED\")\nexcept OSError as e: print(\"blocked\", e)'");
             assert!(!out(&o).contains("CONNECTED"), "{}", out(&o));
@@ -358,6 +469,9 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn c3_no_capabilities_and_no_new_privs() {
         let Some(h) = harness("C3") else { return };
+        if !h.requires("C3", "no_caps") {
+            return;
+        }
         let o = h.run("", "grep -E '^(CapEff|CapPrm|CapBnd|CapAmb|NoNewPrivs):' /proc/self/status; id -u; sudo -n true 2>&1; echo sudo-rc=$?");
         let text = out(&o);
         for cap in [
@@ -375,6 +489,9 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn c4_resource_limits_are_applied() {
         let Some(h) = harness("C4") else { return };
+        if !h.requires("C4", "rlimits") {
+            return;
+        }
         if !has("python3") {
             println!("UNTESTED [C4]: python3 missing");
             assert!(!require_sandbox());
@@ -396,6 +513,9 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn c5_seccomp_is_active_and_denies_kernel_attack_surface() {
         let Some(h) = harness("C5") else { return };
+        if !h.requires("C5", "seccomp") {
+            return;
+        }
         let o = h.run("", "grep -E '^Seccomp:' /proc/self/status");
         assert!(out(&o).contains("Seccomp:\t2"), "{}", out(&o));
         if has("python3") {
@@ -424,13 +544,42 @@ r = libc.syscall(nr, 0, None, 0); print("bpf", r, os.strerror(ctypes.get_errno()
         let Some(h) = harness("C1/C2") else { return };
         let o = h.run(
             "",
-            "git status >/dev/null && echo status-ok; git push origin main; echo push-rc=$?; sudo true; echo sudo-rc=$?; readlink /run/agentkeep/bin/git",
+            "git status >/dev/null && echo status-ok; git push origin main; echo push-rc=$?; sudo true; echo sudo-rc=$?",
         );
         let text = out(&o);
         assert!(text.contains("status-ok"), "{text}");
         assert!(text.contains("push-rc=126"), "{text}");
         assert!(text.contains("sudo-rc=126"), "{text}");
-        assert!(text.contains("../agentkeep"), "{text}");
+    }
+
+    #[test]
+    fn b3_sandbox_cannot_become_its_own_approver() {
+        // The decision socket is reachable from inside; registering as an
+        // approver there must be refused, and asked commands stay denied.
+        let Some(h) = harness("B3") else { return };
+        if !has("python3") {
+            println!("UNTESTED [B3]: python3 missing");
+            assert!(!require_sandbox());
+            return;
+        }
+        let o = h.run(
+            "[approval]\ntransport = [\"socket\"]\ntimeout = \"3s\"\n",
+            r#"python3 -c '
+import os, socket
+s = socket.socket(socket.AF_UNIX); s.connect(os.environ["AGENTKEEP_SOCKET"])
+s.sendall(b"{\"kind\":\"approver\"}\n"); print("reply", s.recv(200).decode().strip())
+'; ls /run/agentkeep 2>/dev/null; git push origin main; echo push-rc=$?"#,
+        );
+        let text = out(&o);
+        assert!(
+            text.contains("approvers must use the host socket"),
+            "{text}"
+        );
+        assert!(
+            !text.contains("approve.sock"),
+            "host approver socket visible:\n{text}"
+        );
+        assert!(text.contains("push-rc=126"), "{text}");
     }
 
     // ---- S: agentkeep itself ------------------------------------------

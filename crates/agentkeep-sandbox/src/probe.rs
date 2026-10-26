@@ -34,6 +34,67 @@ pub struct Capabilities {
     pub rlimits: bool,
     /// `no_new_privs` and an unprivileged uid inside.
     pub no_new_privs: bool,
+    /// A macOS Seatbelt profile confines the process tree.
+    #[serde(default)]
+    pub seatbelt: bool,
+    /// Name of the container runtime in use (`podman`, `docker`), if any.
+    #[serde(default)]
+    pub container_runtime: Option<String>,
+}
+
+impl Capabilities {
+    /// Controls this backend claims, by stable name. The escape suite gates
+    /// each test on these, so a backend is only ever tested against what it
+    /// says it enforces, and everything else is reported as not applicable
+    /// rather than silently passed.
+    ///
+    /// - `fs_absent`: paths outside the policy do not exist (mount view).
+    /// - `fs_denied`: paths outside the policy cannot be read or written.
+    /// - `hardlink_safe`: hardlinks cannot expose files outside the policy.
+    /// - `pid_isolation`: host processes are invisible.
+    /// - `ptrace_denied`: debugging and cross-process memory access fail.
+    /// - `no_mount`: mounts and new namespaces are refused.
+    /// - `net_isolation`: no network path except the proxy.
+    /// - `net_namespace`: only a loopback interface exists.
+    /// - `seccomp`, `landlock`: those kernel filters are active.
+    /// - `no_caps`: no Linux capabilities and `no_new_privs` set.
+    /// - `rlimits`: rlimit-based resource limits.
+    pub fn controls(&self) -> Vec<&'static str> {
+        let mut c = Vec::new();
+        if self.mount_namespace {
+            c.extend(["fs_absent", "fs_denied", "hardlink_safe"]);
+        } else if self.seatbelt {
+            c.push("fs_denied");
+        }
+        if self.pid_namespace {
+            c.push("pid_isolation");
+        }
+        if self.seccomp || self.seatbelt {
+            c.push("ptrace_denied");
+        }
+        if self.seccomp && self.mount_namespace {
+            c.push("no_mount");
+        }
+        if self.net_namespace || self.seatbelt {
+            c.push("net_isolation");
+        }
+        if self.net_namespace {
+            c.push("net_namespace");
+        }
+        if self.seccomp {
+            c.push("seccomp");
+        }
+        if self.landlock_abi > 0 {
+            c.push("landlock");
+        }
+        if self.no_new_privs && cfg!(target_os = "linux") {
+            c.push("no_caps");
+        }
+        if self.rlimits {
+            c.push("rlimits");
+        }
+        c
+    }
 }
 
 /// Result of probing a backend.

@@ -22,7 +22,8 @@ use crate::doctor::EXIT_NO_BACKEND;
 
 /// Inside-sandbox locations.
 const SHIM_DIR: &str = "/run/agentkeep/bin";
-const SOCKET_PATH: &str = "/run/agentkeep/approve.sock";
+/// The sandbox-side decision socket. Shims may only *ask* here.
+const SOCKET_PATH: &str = "/run/agentkeep/exec.sock";
 
 /// Run a command in the sandbox.
 ///
@@ -71,7 +72,9 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
         .context("create session scratch directory")?;
     let root_base = scratch.path().join("root");
     std::fs::create_dir(&root_base)?;
-    let socket_path = scratch.path().join("approve.sock");
+    // exec.sock is bind-mounted into the sandbox; approve.sock never is.
+    let socket_path = scratch.path().join("exec.sock");
+    let approver_path = scratch.path().join("approve.sock");
 
     let session_dir = loaded.policy.audit_dir.join(&session_id);
     let writer = agentkeep_audit::Writer::create(&session_dir)
@@ -81,6 +84,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
     // Approval channel must exist before launch (it is bind-mounted in).
     let mut server = Server::bind(
         &socket_path,
+        &approver_path,
         loaded.compiled.clone(),
         loaded.policy.approval_transports.clone(),
         loaded.policy.approval_timeout,
@@ -104,6 +108,19 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
         env,
         proxy.plan.clone(),
     )?;
+    // The scratch directory holds the approver socket and the session CA
+    // bundle source; it must not be reachable through any mount.
+    if let Some(m) = plan
+        .mounts
+        .iter()
+        .find(|m| !m.source.as_os_str().is_empty() && scratch.path().starts_with(&m.source))
+    {
+        anyhow::bail!(
+            "the session directory {} would be visible inside the sandbox through {}; set TMPDIR to a directory outside the project and mounted paths",
+            scratch.path().display(),
+            m.source.display()
+        );
+    }
 
     append(
         &log,
@@ -135,7 +152,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
         ));
         ui::info(&format!(
             "approval socket {} (agentkeep approve <path>)",
-            server.path().display()
+            server.approver_path().display()
         ));
     }
 

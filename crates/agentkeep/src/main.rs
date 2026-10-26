@@ -97,7 +97,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::from(doctor::EXIT_NO_BACKEND))
         }
         Command::Policy(cmd) => policy_cmd::run(&globals, cmd),
-        Command::Doctor => doctor::run(),
+        Command::Doctor(args) => doctor::run(args.json),
         other => {
             ui::error(&format!(
                 "`{}` is not implemented yet (planned for {}). See PLAN.md.",

@@ -103,26 +103,49 @@ impl Shared {
     }
 }
 
+/// Which socket a connection arrived on. The two are never interchangeable:
+/// the exec socket is bind-mounted into the sandbox and may only *request*
+/// decisions; the approver socket stays on the host and is the only place a
+/// human answer can come from (threat model B3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Role {
+    /// Shims inside the sandbox.
+    Exec,
+    /// `agentkeep approve` clients on the host.
+    Approver,
+}
+
 /// The server half, owned by `agentkeep run`.
 pub struct Server {
     shared: Arc<Shared>,
-    listener: Option<UnixListener>,
-    path: PathBuf,
+    exec_listener: Option<UnixListener>,
+    approver_listener: Option<UnixListener>,
+    approver_path: PathBuf,
 }
 
 impl Server {
-    /// Bind the socket. Call before launching the sandbox so the path exists
-    /// to be bind-mounted.
+    /// Bind both sockets. Call before launching the sandbox so the exec
+    /// socket exists to be bind-mounted. `approver_path` must never be made
+    /// visible inside the sandbox.
     pub fn bind(
-        path: &Path,
+        exec_path: &Path,
+        approver_path: &Path,
         compiled: Compiled,
         transports: Vec<Transport>,
         timeout: Duration,
         no_ask: bool,
         log: LogSink,
     ) -> Result<Self> {
-        let listener =
-            UnixListener::bind(path).with_context(|| format!("bind {}", path.display()))?;
+        let exec_listener = UnixListener::bind(exec_path)
+            .with_context(|| format!("bind {}", exec_path.display()))?;
+        let approver_listener = UnixListener::bind(approver_path)
+            .with_context(|| format!("bind {}", approver_path.display()))?;
+        // Owner-only: other local users must not answer prompts either.
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(approver_path, std::fs::Permissions::from_mode(0o600))
+                .with_context(|| format!("chmod {}", approver_path.display()))?;
+        }
         Ok(Self {
             shared: Arc::new(Shared {
                 compiled,
@@ -133,14 +156,15 @@ impl Server {
                 next_id: Mutex::new(1),
                 log,
             }),
-            listener: Some(listener),
-            path: path.to_path_buf(),
+            exec_listener: Some(exec_listener),
+            approver_listener: Some(approver_listener),
+            approver_path: approver_path.to_path_buf(),
         })
     }
 
-    /// Socket path.
-    pub fn path(&self) -> &Path {
-        &self.path
+    /// Path of the host-only approver socket, for `agentkeep approve`.
+    pub fn approver_path(&self) -> &Path {
+        &self.approver_path
     }
 
     /// The shared state, for the proxy hooks.
@@ -148,23 +172,26 @@ impl Server {
         Arc::clone(&self.shared)
     }
 
-    /// Start accepting connections on a background thread.
+    /// Start accepting connections on background threads.
     pub fn start(&mut self) {
-        let Some(listener) = self.listener.take() else {
-            return;
-        };
-        let shared = Arc::clone(&self.shared);
-        thread::spawn(move || {
-            for conn in listener.incoming() {
-                let Ok(stream) = conn else { continue };
-                let shared = Arc::clone(&shared);
-                thread::spawn(move || handle(stream, &shared));
-            }
-        });
+        for (listener, role) in [
+            (self.exec_listener.take(), Role::Exec),
+            (self.approver_listener.take(), Role::Approver),
+        ] {
+            let Some(listener) = listener else { continue };
+            let shared = Arc::clone(&self.shared);
+            thread::spawn(move || {
+                for conn in listener.incoming() {
+                    let Ok(stream) = conn else { continue };
+                    let shared = Arc::clone(&shared);
+                    thread::spawn(move || handle(stream, &shared, role));
+                }
+            });
+        }
     }
 }
 
-fn handle(mut stream: UnixStream, shared: &Arc<Shared>) {
+fn handle(mut stream: UnixStream, shared: &Arc<Shared>, role: Role) {
     let _ = stream.set_read_timeout(Some(Duration::from_secs(10)));
     let mut line = String::new();
     if BufReader::new(stream.try_clone().ok().map_or_else(
@@ -183,14 +210,31 @@ fn handle(mut stream: UnixStream, shared: &Arc<Shared>) {
         );
         return;
     };
-    match msg {
-        ClientMessage::Approver => {
+    match (msg, role) {
+        (ClientMessage::Approver, Role::Approver) => {
             let _ = stream.set_read_timeout(None);
             if let Ok(mut a) = shared.approvers.lock() {
                 a.push(stream);
             }
         }
-        ClientMessage::Exec { argv, cwd } => {
+        (ClientMessage::Approver, Role::Exec) => {
+            // A sandboxed process tried to become its own approver.
+            shared.log.log(
+                "approval.refused",
+                serde_json::json!({"reason": "approver registration on the sandbox socket"}),
+            );
+            let _ = writeln!(
+                stream,
+                "{{\"decision\":\"deny\",\"rule\":\"approvers must use the host socket\"}}"
+            );
+        }
+        (ClientMessage::Exec { .. }, Role::Approver) => {
+            let _ = writeln!(
+                stream,
+                "{{\"decision\":\"deny\",\"rule\":\"exec requests belong on the sandbox socket\"}}"
+            );
+        }
+        (ClientMessage::Exec { argv, cwd }, Role::Exec) => {
             let reply = decide_exec(shared, &argv, &cwd);
             let _ = writeln!(
                 stream,

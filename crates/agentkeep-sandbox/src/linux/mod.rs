@@ -125,6 +125,8 @@ impl Backend for LinuxBackend {
                 cgroup_v2,
                 rlimits: true,
                 no_new_privs: true,
+                seatbelt: false,
+                container_runtime: None,
             },
             degradations,
         }

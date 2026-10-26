@@ -78,7 +78,7 @@ pub enum Command {
 
     /// Probe the sandbox backends available on this host and report what
     /// each can enforce.
-    Doctor,
+    Doctor(DoctorArgs),
 
     /// Print version information for the binary and each component.
     Version,
@@ -95,7 +95,7 @@ impl Command {
             Command::Log(_) => "log",
             Command::Report(_) => "report",
             Command::Approve(_) => "approve",
-            Command::Doctor => "doctor",
+            Command::Doctor(_) => "doctor",
             Command::Version => "version",
         }
     }
@@ -103,7 +103,7 @@ impl Command {
     /// The phase of `PLAN.md` in which the command is scheduled to land.
     pub fn phase(&self) -> &'static str {
         match self {
-            Command::Run(_) | Command::Policy(_) | Command::Approve(_) | Command::Doctor => {
+            Command::Run(_) | Command::Policy(_) | Command::Approve(_) | Command::Doctor(_) => {
                 "Phase 1"
             }
             Command::Scan(_) => "Phase 3",
@@ -300,6 +300,14 @@ pub enum ReportFormat {
     Markdown,
     /// A single self-contained HTML file with no external assets.
     Html,
+}
+
+/// Arguments for `agentkeep doctor`.
+#[derive(Debug, Args)]
+pub struct DoctorArgs {
+    /// Machine-readable output.
+    #[arg(long)]
+    pub json: bool,
 }
 
 /// Arguments for `agentkeep approve`.
