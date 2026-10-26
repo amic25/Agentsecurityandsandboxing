@@ -7,8 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+### Security
+
+- Proxy: `CONNECT` tunnels on ports other than 443 and 8443 were relayed
+  without inspection, so `CONNECT allowed.host:80` with plaintext HTTP, or
+  TLS on any other port, carried secrets past DLP (N2). Tunnels are now
+  classified by their first bytes: TLS is terminated and scanned, plaintext
+  HTTP is scanned, anything else is refused unless the host is in
+  `network.passthrough`. `Config::inspect_ports` is removed.
+- Proxy: `net.request` events claimed `inspected: true` when DLP was
+  disabled; the field now says whether the request was actually scanned,
+  and a new `tunnel` field says whether it came through `CONNECT`.
+
 ### Added
 
+- Phase 2: network escape tests (N1, N2 over HTTP and inspected TLS, E3,
+  N3, N5, N6, N7, passthrough, and S5 under `strace`) against local
+  recording origins; the suite now has 33 tests.
+- Phase 2: proxy latency benchmark (`benches/proxy.sh`), results in
+  `docs/benchmarks.md`: 0.1 to 1.1 ms added at p50 for 1 KiB bodies, about
+  5 ms for a 1 MiB body with TLS inspection.
+- Phase 2: `proxy_inputs` fuzz target for DLP scanning and destination
+  parsing, and a property test that streaming never misses a secret the
+  whole-buffer scan blocks.
 - Phase 1: policy engine (`agentkeep-policy`) with layered merge,
   tightening-only semantics, `[override]` acknowledgement and a pure
   `decide()`; `agentkeep policy init|show|check`; `agentkeep doctor`.
