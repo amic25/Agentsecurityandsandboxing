@@ -39,6 +39,20 @@ mod suite {
     const FAKE_AWS: &str = "[default]\naws_access_key_id = AKIA_TEST_FAKE_NOT_REAL\naws_secret_access_key = FAKE_TEST_SECRET_agentkeep\n";
     const FAKE_ENV_SECRET: &str = "sk-test-fake-agentkeep-escape-suite";
 
+    /// Host-side configuration of the container runtime CLI, passed through
+    /// to `agentkeep run` when set.
+    const RUNTIME_ENV: &[&str] = &[
+        "AGENTKEEP_CONTAINER_RUNTIME",
+        "CONTAINERS_CONF",
+        "CONTAINER_HOST",
+        "DOCKER_HOST",
+        "DOCKER_CONFIG",
+        "DOCKER_CONTEXT",
+        "XDG_RUNTIME_DIR",
+        "XDG_DATA_HOME",
+        "XDG_CONFIG_HOME",
+    ];
+
     fn bin() -> &'static str {
         env!("CARGO_BIN_EXE_agentkeep")
     }
@@ -132,8 +146,8 @@ mod suite {
                 args.extend(["--backend", self.backend.as_str()]);
             }
             args.extend(["--", "sh", "-c", script]);
-            Command::new(bin())
-                .args(&args)
+            let mut cmd = Command::new(bin());
+            cmd.args(&args)
                 .current_dir(&self.project)
                 .env_clear()
                 .env("HOME", &self.home)
@@ -141,9 +155,17 @@ mod suite {
                 .env("USER", "escapetester")
                 .env("FAKE_SECRET_TOKEN", FAKE_ENV_SECRET)
                 .env("LD_PRELOAD", "/nonexistent/evil.so")
-                .env("TERM", "dumb")
-                .output()
-                .expect("spawn agentkeep")
+                .env("TERM", "dumb");
+            // The container backend's runtime CLI runs on the host side and
+            // needs its own configuration (which runtime, where the daemon
+            // or rootless storage is). The default env policy scrubs all of
+            // these before the sandbox, so they never reach the command.
+            for name in RUNTIME_ENV {
+                if let Some(v) = std::env::var_os(name) {
+                    cmd.env(name, v);
+                }
+            }
+            cmd.output().expect("spawn agentkeep")
         }
     }
 
@@ -265,6 +287,44 @@ mod suite {
         assert!(refused(&out(&o)), "{}", out(&o));
         if h.requires("F1 absent", "fs_absent") {
             assert!(out(&o).contains("No such file"), "{}", out(&o));
+        }
+    }
+
+    #[test]
+    fn f1_hidden_paths_under_a_visible_tree_stay_hidden() {
+        // A policy makes ~/.config visible; the built-in hidden entries
+        // inside it (a directory and a file) must still show nothing. This
+        // is the case where the hidden overlay lies over real content.
+        let Some(h) = harness("F1 hidden") else {
+            return;
+        };
+        fs::create_dir_all(h.home.join(".config/gh")).unwrap();
+        fs::write(
+            h.home.join(".config/gh/hosts.yml"),
+            "oauth_token: ghp_FAKE_TEST_TOKEN_agentkeep\n",
+        )
+        .unwrap();
+        fs::write(
+            h.home.join(".config/hub"),
+            "oauth_token: FAKE_HUB_TOKEN_agentkeep\n",
+        )
+        .unwrap();
+        fs::write(h.home.join(".config/visible.txt"), "VISIBLE_CONFIG\n").unwrap();
+        let o = h.run(
+            "[filesystem]\nread_only = [\"~/.config\"]\n",
+            "cat ~/.config/visible.txt; ls -A ~/.config/gh; echo ls-rc=$?; cat ~/.config/gh/hosts.yml; cat ~/.config/hub; echo done",
+        );
+        let text = out(&o);
+        assert_blocked(
+            &o,
+            &["ghp_FAKE_TEST_TOKEN", "FAKE_HUB_TOKEN", "hosts.yml\n"],
+            "F1 hidden",
+        );
+        assert!(text.contains("VISIBLE_CONFIG"), "{text}");
+        assert!(text.contains("done"), "{text}");
+        if h.requires("F1 hidden empty", "fs_absent") {
+            // The hidden directory exists and is empty.
+            assert!(text.contains("ls-rc=0"), "{text}");
         }
     }
 
@@ -489,6 +549,10 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn c4_resource_limits_are_applied() {
         let Some(h) = harness("C4") else { return };
+        if h.claims("cgroup_limits") {
+            c4_cgroup_limits(&h);
+            return;
+        }
         if !h.requires("C4", "rlimits") {
             return;
         }
@@ -508,6 +572,55 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
             cgroup || text.contains("as (536870912, 536870912)"),
             "{text}"
         );
+    }
+
+    /// Container runtimes enforce memory and pid limits with the
+    /// container's cgroup, which is mounted read-only inside: read the
+    /// limits the kernel holds (cgroup v2 or v1 layout), then run into the
+    /// pid limit for real.
+    fn c4_cgroup_limits(h: &Harness) {
+        if !has("python3") {
+            println!("UNTESTED [C4]: python3 missing");
+            assert!(!require_sandbox());
+            return;
+        }
+        let o = h.run(
+            "[limits]\nmemory = \"512M\"\npids = 64\n",
+            r#"for f in /sys/fs/cgroup/memory.max /sys/fs/cgroup/memory/memory.limit_in_bytes /sys/fs/cgroup/pids.max /sys/fs/cgroup/pids/pids.max; do [ -r "$f" ] && echo "$f=$(cat "$f")"; done
+python3 -c '
+import os, time
+pids = []
+try:
+    for _ in range(200):
+        p = os.fork()
+        if p == 0:
+            time.sleep(5)
+            os._exit(0)
+        pids.append(p)
+except OSError as e:
+    print("fork refused", e.errno)
+print("forked", len(pids))
+for p in pids:
+    os.kill(p, 9)
+'"#,
+        );
+        let text = out(&o);
+        assert!(
+            text.contains("memory.max=536870912")
+                || text.contains("memory.limit_in_bytes=536870912"),
+            "memory limit not in the cgroup:\n{text}"
+        );
+        assert!(
+            text.contains("pids.max=64"),
+            "pid limit not in the cgroup:\n{text}"
+        );
+        assert!(text.contains("fork refused 11"), "{text}");
+        let forked: usize = text
+            .lines()
+            .find_map(|l| l.strip_prefix("forked "))
+            .and_then(|n| n.trim().parse().ok())
+            .unwrap_or(usize::MAX);
+        assert!(forked < 64, "more processes than the limit:\n{text}");
     }
 
     #[test]
