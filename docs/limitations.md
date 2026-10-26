@@ -6,7 +6,8 @@ current: a limitation that is fixed is removed with the PR that fixes it, and
 a new gap is added with the PR that discovers it.
 
 Status: **Phase 1**. `agentkeep run` works on Linux with the namespaces
-backend; `policy init|show|check`, `doctor` and `approve` work everywhere
+backend and, on Linux hosts, the container backend (Podman or Docker);
+`policy init|show|check`, `doctor` and `approve` work everywhere
 the binary builds. The proxy (`network` rules), `scan`, `mcp-gateway`, `log`
 and `report` are not implemented yet and exit with status 70. There is no
 network inside the sandbox at all until Phase 2 adds the proxy.
@@ -84,14 +85,117 @@ network inside the sandbox at all until Phase 2 adds the proxy.
 
 ## Container backend
 
-- Trusts the container runtime (Podman or Docker). A rootful Docker daemon
-  makes the user effectively root on the host; prefer rootless Podman.
-- Requires the runtime CLI on `PATH`. The daemon socket is never mounted into
-  the sandbox.
-- gVisor (`--runtime=runsc`) is used only when the policy asks and the runtime
-  reports it; otherwise the runtime's default seccomp profile applies.
-- Startup overhead is well above the 50 ms target; it is measured and
-  published separately.
+`--backend container` (or `auto` when the linux backend is unavailable) runs
+the same launch plan in a Podman or Docker container, driven through the
+runtime CLI. Podman is preferred when it works, then Docker;
+`AGENTKEEP_CONTAINER_RUNTIME=podman|docker` picks one. Verified with the full
+escape suite (all tests pass, none reported NOT APPLICABLE) on Linux 6.18
+x86_64 with Docker 29.9 (rootful, run as root and as a `docker`-group user,
+cgroup v1) and Podman 4.9.3 (rootful as root; rootless with `keep-id` as an
+unprivileged user; both with runc). CI runs it with Docker on GitHub's
+cgroup v2 runners; rootless Podman with crun on cgroup v2 runs there as a
+non-blocking experiment and is otherwise untested.
+
+- **Trusts the container runtime.** With rootful Docker or rootful Podman a
+  root daemon or runtime builds the container, there is no user namespace,
+  and the command runs with the invoking user's host uid (uid 0 without
+  capabilities when agentkeep itself runs as root). A container escape
+  through a runtime or kernel bug is root on the host. The probe reports
+  this as a `container_runtime` degradation on every run. Prefer rootless
+  Podman, where the invoking user is mapped to the plan's uid with `keep-id`
+  like the linux backend's user namespace. Rootless Docker (container root is
+  the invoking user) is implemented but untested.
+- **Linux hosts only for now.** PID 1 in the container is the host's own
+  agentkeep binary, bind-mounted read-only, so it must be a Linux binary for
+  the container's kernel; and the proxy, approval and lifeline channels are
+  Unix sockets bind-mounted from the host, which do not cross the VM
+  boundary of Docker Desktop (or reach a remote `DOCKER_HOST`). The probe
+  refuses Docker Desktop and any daemon whose kernel differs from the host's.
+  macOS and Windows would need a Linux agentkeep inside the VM and a socket
+  transport that crosses it.
+- **gVisor is detected, not used.** When `runsc` is registered with Docker
+  (or on `PATH` for Podman) the probe reports a `gvisor` degradation saying
+  the stronger runtime is available but unused. There is no policy knob:
+  gVisor refuses connections to host Unix sockets unless the runtime is
+  configured with `--host-uds`, and has no Landlock, which container init
+  refuses to run without when the host kernel has it. If `runsc` is the
+  runtime's *default*, the backend reports itself unavailable. None of this
+  is tested; the test host has no gVisor.
+- **Startup overhead** is far above the 50 ms target: about 385 ms (Docker)
+  and 660 ms (Podman) at p50 against 22 ms for the linux backend in the same
+  session, see `docs/benchmarks.md`. `auto` therefore prefers the linux
+  backend.
+- **Limits.** When the runtime enforces `--memory` and `--pids-limit`
+  (rootful runtimes; rootless Podman only with delegated `memory` and `pids`
+  controllers) those are the limits, swap is disabled with `--memory-swap`,
+  and the escape suite checks them in the container's cgroup and runs into
+  the pid limit. Otherwise init falls back to rlimits like the linux backend,
+  where `RLIMIT_NPROC` counts every process of the uid in its user namespace:
+  for a rootful runtime that is all of the user's processes on the host, so
+  a low `limits.pids` can make forks fail early. On cgroup v1 hosts the
+  limits come from the v1 controllers; for this backend the `cgroup_v2`
+  capability field means "the runtime's cgroup enforces the limits".
+  `cpu_percent` becomes `--cpus`, omitted when it would not restrict
+  anything; no test checks CPU throttling.
+- **Bind mounts carry no `nosuid`/`nodev`.** Docker's `--mount` has no such
+  options (the linux backend sets both). Setuid bits stay inert because of
+  `no-new-privileges`, and device nodes on a bind mount cannot be opened
+  because of the runtime's device cgroup.
+- **Runtime-provided files.** The runtime adds `/etc/hosts`, `/etc/hostname`
+  and `/etc/resolv.conf` (a copy of the host's resolver configuration; no
+  resolver is reachable with `--network none`), and Podman adds
+  `/run/.containerenv` (container and image name). `/proc` and `/sys` are the
+  runtime's, with its masked paths, and `/proc` has no `hidepid`; host
+  processes are invisible through the pid namespace alone.
+- **The plan file stays readable.** `/run/agentkeep/plan.json` (mounts,
+  limits, command and environment) is bind-mounted read-only for the whole
+  session. It holds nothing the command does not already receive, but the
+  host paths of the session files are visible (not their contents; the
+  host-only approver socket is never mounted). The linux backend passes its
+  plan through a file descriptor that is closed before the command starts.
+- **No `--env-file`.** The environment reaches the command through the plan
+  file, never the runtime: PID 1 is agentkeep and must start without
+  `LD_PRELOAD` and friends (E2), the env-file format cannot carry a value
+  with a newline (which would inject a variable), and the runtime would
+  keep a copy. PID 1's own environment is the runtime's (`PATH`,
+  `HOSTNAME`, `HOME`, Podman's `container`).
+- **The runtime CLI** inherits the user's environment except `LD_*`
+  variables (and, for Podman, `USER`, which can be stale and then breaks
+  rootless id mapping). The daemon socket is never mounted into the
+  sandbox, and `docker`/`podman` stay in the default `commands.ask` list.
+- **The image** is `localhost/agentkeep/empty:1`: an empty layer imported
+  locally on first use, never pulled (`--pull=never`). An image under that
+  name with any other layer, an environment or volumes is refused.
+- **Cleanup.** Normal exit, setup failure, Ctrl-C, SIGTERM, the wall-clock
+  limit and SIGKILL of the supervisor after the container started all leave
+  no container behind (the last through the lifeline socket: init kills
+  everything when the supervisor's end closes). Signals, SIGKILL and the TTY
+  path were checked by hand with Docker only, not by the automated suite
+  (which covers exit codes, setup and the wall-clock limit). Residual: if
+  the supervisor is SIGKILLed in the instant
+  between the runtime creating and starting the container, a created,
+  never-started container can remain (`docker ps -a --filter
+  label=dev.agentkeep.session`).
+- **Interactive use.** With a TTY, Docker's detach sequence is set to
+  `ctrl-^ ctrl-@` because Docker cannot disable it; Podman's is disabled.
+  Detaching ends the session (the lifeline closes).
+- **Paths** containing `,`, `"` or a newline, and tmpfs targets containing
+  `:`, are refused rather than passed to the runtime's mount syntax; use the
+  linux backend for them.
+- **SELinux hosts** (enforcing, e.g. Fedora): bind mounts are not relabelled,
+  since relabelling would change the labels of the user's project on the
+  host, so the runtime's SELinux policy may deny access. Untested.
+- **Runtime selection probes `info`, not a container start.** A Podman whose
+  `info` answers but whose OCI runtime cannot start containers (crun on a
+  hybrid cgroup v1/v2 host, for example) is still preferred, and every
+  session then fails at start with the runtime's error; set
+  `AGENTKEEP_CONTAINER_RUNTIME=docker` or fix the runtime.
+- **Podman versions.** `--userns keep-id:uid=,gid=` needs Podman 4.3+.
+  Podman's tmpfs copies the covered directory into the new tmpfs by default,
+  which would bring hidden files back; the backend passes `notmpcopyup`
+  (found by `f1_hidden_paths_under_a_visible_tree_stay_hidden`). On the test
+  host crun refuses the hybrid cgroup layout, so Podman was verified with
+  runc only.
 
 ## Windows and WSL2
 

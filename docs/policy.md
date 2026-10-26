@@ -31,6 +31,10 @@ directory prefixes: `~/.config` covers everything beneath it.
 | `allow_degraded` | `false` | Run even when the backend cannot enforce every rule |
 | `preset` | unset | Agent preset name (Phase 5) |
 
+`container` uses Podman when it works and Docker otherwise; the environment
+variable `AGENTKEEP_CONTAINER_RUNTIME=podman|docker` picks one. It is not a
+policy key because it describes the host, not what the agent may do.
+
 ## `[filesystem]`
 
 | Key | Default | Meaning |
