@@ -12,6 +12,8 @@ mod approval;
 mod cli;
 mod doctor;
 mod load;
+#[cfg(unix)]
+mod netwire;
 mod policy_cmd;
 #[cfg(unix)]
 mod run;

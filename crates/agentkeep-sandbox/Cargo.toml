@@ -24,6 +24,7 @@ libc = { workspace = true }
 rustix = { workspace = true }
 seccompiler = { workspace = true }
 tempfile = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "io-util"] }
 
 [dev-dependencies]
 tempfile = { workspace = true }

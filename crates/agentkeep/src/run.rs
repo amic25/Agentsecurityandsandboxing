@@ -15,6 +15,7 @@ use anyhow::{Context, Result};
 use crate::approval::{LogSink, Server};
 use crate::cli::{Globals, RunArgs};
 use crate::load::{self, Host, Loaded};
+use crate::netwire;
 use crate::ui;
 
 use crate::doctor::EXIT_NO_BACKEND;
@@ -77,8 +78,22 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
         .with_context(|| format!("create audit log in {}", session_dir.display()))?;
     let log = Arc::new(Mutex::new(Some(writer)));
 
+    // Approval channel must exist before launch (it is bind-mounted in).
+    let mut server = Server::bind(
+        &socket_path,
+        loaded.compiled.clone(),
+        loaded.policy.approval_transports.clone(),
+        loaded.policy.approval_timeout,
+        globals.no_ask,
+        LogSink(Arc::clone(&log)),
+    )?;
+
+    // The egress proxy: CA, bundle and socket now; runtime after launch.
+    let mut proxy = netwire::prepare(&loaded, scratch.path(), server.shared())?;
+
     // Plan.
-    let (env, scrubbed) = build_env(&loaded, &host);
+    let (mut env, scrubbed) = build_env(&loaded, &host);
+    netwire::proxy_env(&mut env);
     let plan = build_plan(
         &loaded,
         &host,
@@ -87,6 +102,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
         &root_base,
         &socket_path,
         env,
+        proxy.plan.clone(),
     )?;
 
     append(
@@ -107,18 +123,9 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
             "env_scrubbed_secrets": scrubbed.secret_like,
             "mounts": plan.mounts,
             "limits": plan.limits,
+            "network": proxy.describe(),
         }),
     );
-
-    // Approval channel must exist before launch (it is bind-mounted in).
-    let mut server = Server::bind(
-        &socket_path,
-        loaded.compiled.clone(),
-        loaded.policy.approval_transports.clone(),
-        loaded.policy.approval_timeout,
-        globals.no_ask,
-        LogSink(Arc::clone(&log)),
-    )?;
 
     if globals.verbose > 0 {
         ui::info(&format!("session {session_id}"));
@@ -147,6 +154,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
     #[cfg(target_os = "linux")]
     agentkeep_sandbox::linux::install_supervisor_signals();
     server.start();
+    let _proxy_runtime = proxy.start()?;
     let _timer = loaded.policy.limits.wall_time.map(|t| handle.kill_after(t));
 
     let status = handle.wait().context("wait for sandbox")?;
@@ -250,6 +258,7 @@ fn shim_commands(policy: &Policy) -> Vec<String> {
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_plan(
     loaded: &Loaded,
     host: &Host,
@@ -258,6 +267,7 @@ fn build_plan(
     root_base: &Path,
     socket_path: &Path,
     env: BTreeMap<String, String>,
+    proxy: agentkeep_sandbox::ProxyPlan,
 ) -> Result<LaunchPlan> {
     let policy = &loaded.policy;
     let project = policy.project.clone();
@@ -353,6 +363,7 @@ fn build_plan(
             commands: shim_commands(policy),
             socket: PathBuf::from(SOCKET_PATH),
         }),
+        proxy: Some(proxy),
         landlock: true,
         seccomp: true,
         inner_uid: agentkeep_sandbox::linux_inner_uid(),

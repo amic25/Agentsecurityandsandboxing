@@ -58,6 +58,21 @@ pub struct ShimConfig {
     pub socket: PathBuf,
 }
 
+/// How the sandbox reaches the egress proxy.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProxyPlan {
+    /// Host path of the proxy's Unix socket.
+    pub host_socket: PathBuf,
+    /// Where it appears inside the sandbox.
+    pub sandbox_socket: PathBuf,
+    /// Loopback TCP port the in-sandbox relay listens on.
+    pub port: u16,
+    /// Host path of the CA bundle (system roots plus the session CA).
+    pub ca_bundle_host: PathBuf,
+    /// Where the bundle appears inside the sandbox.
+    pub ca_bundle_sandbox: PathBuf,
+}
+
 /// Everything a backend needs to start a sandbox.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LaunchPlan {
@@ -90,6 +105,8 @@ pub struct LaunchPlan {
     pub approval_socket: Option<PathBuf>,
     /// Shim configuration.
     pub shim: Option<ShimConfig>,
+    /// Egress proxy wiring. `None` means no network at all.
+    pub proxy: Option<ProxyPlan>,
     /// Apply a Landlock ruleset in addition to mounts when available.
     pub landlock: bool,
     /// Apply the seccomp deny-list.
@@ -138,6 +155,7 @@ mod tests {
             user_name: "agent".into(),
             approval_socket: None,
             shim: None,
+            proxy: None,
             landlock: true,
             seccomp: true,
             inner_uid: 1000,

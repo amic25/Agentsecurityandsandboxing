@@ -15,7 +15,7 @@ use rustix::process::{set_parent_process_death_signal, Signal};
 
 use crate::plan::LaunchPlan;
 
-use super::{landlock_rules, limits, mounts, seccomp, sys};
+use super::{landlock_rules, limits, mounts, relay, seccomp, sys};
 
 /// Exit code of init when setup fails before the command starts.
 pub const SETUP_FAILED: i32 = 125;
@@ -119,6 +119,12 @@ fn setup_and_spawn(plan: &LaunchPlan) -> Result<std::process::Child, String> {
     sys::loopback_up().map_err(|e| format!("loopback up: {e}"))?;
 
     mounts::build_root(plan)?;
+
+    // The relay must listen before the command starts so the first request
+    // never races it. It needs no privileges.
+    if let Some(proxy) = &plan.proxy {
+        relay::start(proxy.port, proxy.sandbox_socket.clone())?;
+    }
 
     // Limits: memory via rlimit only when no cgroup took it (the supervisor
     // tells us through the plan's limits having memory set; it clears it

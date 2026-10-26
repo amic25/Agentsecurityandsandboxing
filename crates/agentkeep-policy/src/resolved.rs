@@ -132,12 +132,16 @@ pub struct Policy {
     pub passthrough: Vec<String>,
     /// Private ranges allowed.
     pub allow_private: bool,
+    /// Extra CA bundles trusted for origins.
+    pub trusted_cas: Vec<PathBuf>,
     /// DLP on.
     pub dlp_enabled: bool,
     /// Extra literal values to block.
     pub dlp_block_values: Vec<String>,
     /// Secret name to allowed domains.
     pub dlp_provider_domains: BTreeMap<String, Vec<String>>,
+    /// Detectors that report instead of block.
+    pub dlp_report_only: Vec<String>,
     /// Command globs that ask.
     pub cmd_ask: Vec<String>,
     /// Command globs that deny.
@@ -358,6 +362,8 @@ impl Policy {
                 .map_err(|e| ResolveError::invalid("approval.timeout", e.to_string()))?,
         };
 
+        let trusted_cas = expand_all("network.trusted_cas", &net.trusted_cas)?;
+
         let audit = file.audit.clone().unwrap_or_default();
         let audit_dir = paths::expand(
             audit
@@ -385,9 +391,11 @@ impl Policy {
             tls_inspect: net.tls_inspect.unwrap_or(true),
             passthrough: net.passthrough,
             allow_private: net.allow_private.unwrap_or(false),
+            trusted_cas,
             dlp_enabled: dlp.enabled.unwrap_or(true),
             dlp_block_values: dlp.block_values,
             dlp_provider_domains: dlp.allow_provider_keys_to,
+            dlp_report_only: dlp.report_only,
             cmd_ask: cmds.ask,
             cmd_deny: cmds.deny,
             mcp: McpPolicy {

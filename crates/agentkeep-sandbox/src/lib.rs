@@ -22,7 +22,7 @@ pub mod linux;
 use std::fmt;
 use std::time::Duration;
 
-pub use plan::{LaunchPlan, Limits, Mount, MountMode, ShimConfig};
+pub use plan::{LaunchPlan, Limits, Mount, MountMode, ProxyPlan, ShimConfig};
 pub use probe::{Capabilities, Degradation, Probe};
 
 /// The crate version, re-exported so the CLI can report component versions.

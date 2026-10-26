@@ -121,6 +121,10 @@ pub struct NetworkSection {
     /// Permit connections to private and link-local address ranges.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub allow_private: Option<bool>,
+    /// Extra PEM bundles trusted when the proxy connects to origins
+    /// (corporate CAs, test fixtures).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub trusted_cas: Vec<String>,
 }
 
 /// `[dlp]`
@@ -136,6 +140,9 @@ pub struct DlpSection {
     /// Which domains each passed secret may travel to.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub allow_provider_keys_to: BTreeMap<String, Vec<String>>,
+    /// Detector ids that log instead of blocking (see `docs/policy.md`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub report_only: Vec<String>,
 }
 
 /// `[commands]`

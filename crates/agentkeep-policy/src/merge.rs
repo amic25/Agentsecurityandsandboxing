@@ -115,11 +115,13 @@ pub fn merge(layers: &[Layer]) -> (PolicyFile, Vec<Warning>) {
             set(&mut o.tls_inspect, s.tls_inspect.as_ref());
             union(&mut o.passthrough, &s.passthrough);
             set(&mut o.allow_private, s.allow_private.as_ref());
+            union(&mut o.trusted_cas, &s.trusted_cas);
         }
         if let Some(s) = &f.dlp {
             let o = out.dlp.get_or_insert_with(DlpSection::default);
             set(&mut o.enabled, s.enabled.as_ref());
             union(&mut o.block_values, &s.block_values);
+            union(&mut o.report_only, &s.report_only);
             for (k, v) in &s.allow_provider_keys_to {
                 union(o.allow_provider_keys_to.entry(k.clone()).or_default(), v);
             }

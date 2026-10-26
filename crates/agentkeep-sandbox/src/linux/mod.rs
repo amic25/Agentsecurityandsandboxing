@@ -5,6 +5,7 @@ pub mod init;
 pub mod landlock_rules;
 pub mod limits;
 pub mod mounts;
+pub mod relay;
 pub mod seccomp;
 pub mod sys;
 

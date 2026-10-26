@@ -302,6 +302,28 @@ fn setup_shims(plan: &LaunchPlan, base: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// The proxy socket and the CA bundle, both read-only binds under
+/// `/run/agentkeep`.
+fn setup_proxy(plan: &LaunchPlan, base: &Path) -> Result<(), String> {
+    let Some(proxy) = &plan.proxy else {
+        return Ok(());
+    };
+    let sock = rel(base, &proxy.sandbox_socket);
+    touch(&sock)?;
+    step(
+        "bind proxy socket",
+        sys::mount(Some(&proxy.host_socket), &sock, None, libc::MS_BIND, None),
+    )?;
+    let ca = rel(base, &proxy.ca_bundle_sandbox);
+    touch(&ca)?;
+    bind(
+        &proxy.ca_bundle_host,
+        &ca,
+        libc::MS_RDONLY | libc::MS_NOEXEC,
+    )?;
+    Ok(())
+}
+
 /// A minimal `/etc/passwd` and `/etc/group` so `getpwuid` resolves the inner
 /// uid. Many tools (git, ssh clients, shells) misbehave without one.
 fn setup_identity(plan: &LaunchPlan, base: &Path) -> Result<(), String> {
@@ -372,6 +394,7 @@ pub fn build_root(plan: &LaunchPlan) -> Result<Vec<String>, String> {
     }
     mkdir_p(&run.join(format!("user/{}", plan.inner_uid)))?;
     setup_shims(plan, base)?;
+    setup_proxy(plan, base)?;
     setup_identity(plan, base)?;
     setup_dev(base)?;
 

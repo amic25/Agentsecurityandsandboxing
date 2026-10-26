@@ -78,7 +78,9 @@ impl LogSink {
     }
 }
 
-struct Shared {
+/// State shared by the socket server and anything else that needs to ask a
+/// human (the egress proxy).
+pub struct Shared {
     compiled: Compiled,
     transports: Vec<Transport>,
     timeout: Duration,
@@ -86,6 +88,19 @@ struct Shared {
     approvers: Mutex<Vec<UnixStream>>,
     next_id: Mutex<u64>,
     log: LogSink,
+}
+
+impl Shared {
+    /// Ask a human through the configured transports; deny on timeout or
+    /// when nobody can answer.
+    pub fn ask_human(self: &Arc<Self>, prompt: &str, rule: &str) -> bool {
+        ask(self, prompt, rule)
+    }
+
+    /// Record an event in the audit log.
+    pub fn log(&self, kind: &str, data: serde_json::Value) {
+        self.log.log(kind, data);
+    }
 }
 
 /// The server half, owned by `agentkeep run`.
@@ -126,6 +141,11 @@ impl Server {
     /// Socket path.
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// The shared state, for the proxy hooks.
+    pub fn shared(&self) -> Arc<Shared> {
+        Arc::clone(&self.shared)
     }
 
     /// Start accepting connections on a background thread.
