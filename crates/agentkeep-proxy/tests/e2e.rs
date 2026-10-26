@@ -242,6 +242,21 @@ fn plain_http_is_forwarded_and_logged() {
 }
 
 #[test]
+fn log_does_not_claim_inspection_when_dlp_is_off() {
+    // Regression: `inspected` used to be derived from the transport, so a
+    // session with `dlp.enabled = false` logged every request as scanned.
+    let origin = start_plain_origin();
+    let cfg = Config {
+        dlp: DlpConfig::default(),
+        ..Config::default()
+    };
+    let p = start_proxy(cfg, &["127.0.0.1"], None);
+    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/k?AKIAIOSFODNN7EXAMPLE HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", origin.port()));
+    assert!(out.contains("HTTP/1.1 200"), "DLP is off: {out}");
+    assert_eq!(p.hooks.find("net.request").unwrap()["inspected"], false);
+}
+
+#[test]
 fn denied_host_gets_403_without_connecting() {
     let origin = start_plain_origin();
     let p = start_proxy(Config::default(), &["allowed.example"], None);

@@ -552,11 +552,14 @@ async fn forward(
         }
     };
 
+    // Every request that reaches here went past the scanner, if there is
+    // one; with DLP disabled the log must not claim a scan.
     state.hooks.log(
         "net.request",
         serde_json::json!({
             "host": host, "port": port, "method": method.as_str(), "path": path_only,
-            "status": response.status().as_u16(), "inspected": in_tunnel || !tls, "tls": tls,
+            "status": response.status().as_u16(), "inspected": state.scanner.is_some(),
+            "tls": tls, "tunnel": in_tunnel,
         }),
     );
 
