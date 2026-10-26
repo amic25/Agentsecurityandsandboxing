@@ -35,7 +35,12 @@ allow = [
   "CC0-1.0",
 ]
 confidence-threshold = 0.9
-exceptions = []
+exceptions = [
+  # webpki-roots ships Mozilla's root certificate list, which is data under
+  # the Community Data License Agreement (Permissive 2.0): no copyleft, no
+  # conditions beyond keeping the notice. Scoped to this crate only.
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
 
 [bans]
 multiple-versions = "warn"
