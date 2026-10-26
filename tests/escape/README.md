@@ -11,6 +11,17 @@ Run it with `tests/escape/run.sh`. It never skips silently: on a host without
 a usable backend every test prints `UNTESTED ON THIS HOST`, and with
 `AGENTKEEP_REQUIRE_SANDBOX=1` that is a failure.
 
-All fixtures are fake (`FAKE_TEST_KEY`, `AKIA_TEST_FAKE...`) and the only
-network destination is loopback or a TEST-NET address that must be
-unreachable.
+The network tests start their own origins on host `127.0.0.1` (plain HTTP,
+and TLS with a throwaway self-signed certificate trusted through
+`network.trusted_cas`). Each origin records every byte it receives, so a test
+can assert that a blocked secret never arrived. They cover the allowlist
+(N1), DLP over HTTP and inside inspected TLS (N2), provider-key binding (E3),
+private and metadata addresses (N5), passthrough, DNS (N3), WebSocket
+upgrades (N7), the session CA (N6), and, under `strace`, that the
+supervisor itself opens no network connection (S5). `curl`, `python3` and
+`strace` are needed on the host; a missing tool is reported as UNTESTED.
+
+All fixtures are fake (`FAKE_TEST_KEY`, `AKIATESTFAKE...`, `ghp_TESTFAKE...`,
+`sk-ant-test-fake-...`) and the only network destinations are host
+loopback, a TEST-NET address that must be unreachable, and
+`169.254.169.254`, which the proxy must refuse before connecting.
