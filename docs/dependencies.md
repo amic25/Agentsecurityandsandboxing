@@ -30,6 +30,13 @@ code we ask users to trust. Rules:
 | `tempfile` | sandbox (plan file), CLI (session scratch dir) | Secure temp files and directories with automatic cleanup and O_TMPFILE where available | `std` only: would need to reimplement safe unique naming |
 | `thiserror` | all library crates | Typed error enums with derived `Display` and `source` | Manual `impl Error`: boilerplate without benefit |
 | `toml` | policy, CLI | The policy file format; version 1.x reports spans for line/column errors | `toml_edit`: needed only if we rewrote files preserving comments (`policy init` writes from a template instead) |
+| `tokio` | proxy, sandbox (in-sandbox relay) | Async runtime for the proxy's many concurrent tunnels; the relay uses a current-thread runtime only | Threads per connection: workable but unbounded thread counts under load and no clean timeouts |
+| `hyper`, `hyper-util`, `http`, `http-body-util`, `bytes` | proxy | HTTP/1.1 server and client with upgrade support, so the proxy never hand-parses HTTP (request smuggling is a classic proxy bug) | `httparse` plus hand-written framing: smaller, much riskier |
+| `rustls`, `tokio-rustls`, `rustls-pki-types` | proxy | TLS termination for inspection and TLS to origins, memory-safe, no OpenSSL | OpenSSL bindings: banned in `deny.toml` (C, dynamic linking) |
+| `ring` (via rustls, rcgen) | proxy | Crypto provider for rustls and the session CA. It contains C and assembly; every rustls provider does (`aws-lc-rs` likewise), and a pure-Rust provider is not mature enough for a security boundary. Widely deployed and audited | `aws-lc-rs`: larger C build with cmake; pure-Rust providers: not production-ready |
+| `rcgen` | proxy | Generates the per-session CA and per-host leaf certificates in memory | Shelling out to `openssl`: slower, writes keys to disk, extra runtime dependency |
+| `webpki-roots` | proxy | The Mozilla root set compiled in, so origin verification does not depend on the host trust store. Licensed CDLA-Permissive-2.0 (permissive data licence), allowed for this crate only in `deny.toml` | `rustls-native-certs`: trusts whatever the host trusts; can be added later as an option |
+| `regex`, `aho-corasick` | proxy (DLP) | Linear-time matching for the detector set and literal secrets, no catastrophic backtracking on hostile input | Hand-written scanners per detector: error-prone |
 
 ## Development dependencies
 
@@ -41,6 +48,5 @@ code we ask users to trust. Rules:
 
 ## Planned (will be justified when added)
 
-Phase 2: `tokio`, `hyper`, `hyper-util`, `rustls`, `rcgen`, `webpki-roots`,
-`aho-corasick`, `regex`. Phase 3: `unicode-security`. Phase 5: `ratatui`,
+Phase 3: `unicode-security`. Phase 5: `ratatui`,
 `crossterm`, `criterion` (dev).

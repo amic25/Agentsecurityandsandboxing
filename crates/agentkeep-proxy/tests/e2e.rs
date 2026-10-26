@@ -2,6 +2,7 @@
 //! inspection, TLS passthrough, policy denial and DLP blocking. No traffic
 //! leaves the machine.
 
+#![cfg(unix)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::io::{Read, Write};

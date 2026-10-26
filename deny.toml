@@ -35,7 +35,11 @@ allow = [
   "CC0-1.0",
 ]
 confidence-threshold = 0.9
-exceptions = []
+exceptions = [
+  # The Mozilla CA root list, used by the proxy to verify origins. CDLA
+  # Permissive 2.0 is a permissive data licence; scoped to this crate only.
+  { allow = ["CDLA-Permissive-2.0"], crate = "webpki-roots" },
+]
 
 [bans]
 multiple-versions = "warn"

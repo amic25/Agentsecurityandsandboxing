@@ -20,6 +20,9 @@
 pub mod ca;
 pub mod dlp;
 pub mod hosts;
+// The proxy serves a Unix socket that is bind-mounted into the sandbox;
+// there is no Windows sandbox to serve yet.
+#[cfg(unix)]
 pub mod server;
 
 use std::collections::HashMap;
@@ -151,6 +154,7 @@ pub struct AskCache {
     answers: Mutex<HashMap<String, bool>>,
 }
 
+#[cfg_attr(not(unix), allow(dead_code))] // used by the Unix-only server
 impl AskCache {
     fn get(&self, host: &str) -> Option<bool> {
         self.answers.lock().ok()?.get(host).copied()
@@ -208,6 +212,7 @@ impl State {
     }
 }
 
+#[cfg(unix)]
 /// Run the accept loop until the listener errors. Call inside a tokio
 /// runtime. The listener is a std socket so it can be bound before any
 /// thread exists and bind-mounted before the sandbox starts.
@@ -231,6 +236,7 @@ pub async fn serve(
     }
 }
 
+#[cfg(unix)]
 /// Start the proxy on a dedicated thread with its own multi-threaded runtime.
 /// Returns once the runtime is up; the proxy runs until the process exits or
 /// the returned handle is dropped.
