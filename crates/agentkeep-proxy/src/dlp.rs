@@ -535,6 +535,46 @@ mod tests {
         SCANNER.get_or_init(scanner)
     }
 
+    /// Fake secrets in every blocking format the streaming test plants.
+    const PLANTED: &[&str] = &[
+        "AKIAIOSFODNN7EXAMPLE",
+        "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij0",
+        "sk-ant-api03-FAKEFAKEFAKEFAKEFAKEFAKE",
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "xoxb-1234567890-abcdefghijk",
+        "AIzaSyFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEX",
+    ];
+
+    proptest::proptest! {
+        // Few cases: each streams up to 5 KB in chunks as small as one byte.
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(40))]
+        /// Choosing chunk sizes must not hide a secret: whatever is blocked
+        /// as one buffer is blocked when streamed (same invariant as the
+        /// `proxy_inputs` fuzz target, which needs nightly).
+        #[test]
+        fn streaming_blocks_whatever_the_whole_buffer_blocks(
+            prefix in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..5000),
+            suffix in proptest::collection::vec(proptest::prelude::any::<u8>(), 0..200),
+            which in 0..PLANTED.len(),
+            chunk in 1usize..700,
+        ) {
+            let scanner = shared_scanner();
+            let mut data = prefix;
+            data.push(b' ');
+            data.extend_from_slice(PLANTED[which].as_bytes());
+            data.push(b' ');
+            data.extend_from_slice(&suffix);
+            let whole = scanner.scan(&data, "h", 443, "body");
+            proptest::prop_assert!(whole.as_ref().is_some_and(|f| f.action == Action::Block));
+            let mut body = BodyScanner::new();
+            let streamed = data
+                .chunks(chunk)
+                .filter_map(|c| body.feed(scanner, c, "h", 443))
+                .any(|f| f.action == Action::Block);
+            proptest::prop_assert!(streamed, "missed {} in {chunk}-byte chunks", PLANTED[which]);
+        }
+    }
+
     proptest::proptest! {
         #![proptest_config(proptest::prelude::ProptestConfig::with_cases(128))]
         #[test]

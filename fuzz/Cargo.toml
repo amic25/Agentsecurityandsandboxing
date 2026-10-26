@@ -10,6 +10,7 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 agentkeep-policy = { path = "../crates/agentkeep-policy" }
+agentkeep-proxy = { path = "../crates/agentkeep-proxy" }
 
 # Keep the fuzz crate out of the main workspace: it needs nightly.
 [workspace]
@@ -18,6 +19,13 @@ members = ["."]
 [[bin]]
 name = "policy_parse"
 path = "fuzz_targets/policy_parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "proxy_inputs"
+path = "fuzz_targets/proxy_inputs.rs"
 test = false
 doc = false
 bench = false
