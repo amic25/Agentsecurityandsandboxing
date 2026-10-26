@@ -28,7 +28,9 @@ pub struct Capabilities {
     pub landlock_abi: u32,
     /// seccomp syscall deny-list.
     pub seccomp: bool,
-    /// Memory and pid limits via cgroup v2.
+    /// Memory and pid limits via cgroup v2. For a container runtime: the
+    /// runtime enforces `--memory` and `--pids-limit` through the
+    /// container's cgroup (v2, or v1 on legacy hosts).
     pub cgroup_v2: bool,
     /// Memory and pid limits via rlimits (approximate).
     pub rlimits: bool,
@@ -59,6 +61,10 @@ impl Capabilities {
     /// - `seccomp`, `landlock`: those kernel filters are active.
     /// - `no_caps`: no Linux capabilities and `no_new_privs` set.
     /// - `rlimits`: rlimit-based resource limits.
+    /// - `cgroup_limits`: memory and pid limits live in a cgroup that is
+    ///   visible (read-only) inside the sandbox, so they can be checked from
+    ///   there. Container runtimes only: the Linux backend's cgroup is not
+    ///   mounted inside its sandbox.
     pub fn controls(&self) -> Vec<&'static str> {
         let mut c = Vec::new();
         if self.mount_namespace {
@@ -92,6 +98,9 @@ impl Capabilities {
         }
         if self.rlimits {
             c.push("rlimits");
+        }
+        if self.cgroup_v2 && self.container_runtime.is_some() {
+            c.push("cgroup_limits");
         }
         c
     }
@@ -141,5 +150,46 @@ impl Probe {
             Self::Available { degradations, .. } => degradations,
             Self::Unavailable { .. } => &[],
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn namespaces() -> Capabilities {
+        Capabilities {
+            mount_namespace: true,
+            pid_namespace: true,
+            net_namespace: true,
+            landlock_abi: 5,
+            seccomp: true,
+            cgroup_v2: true,
+            rlimits: true,
+            no_new_privs: true,
+            seatbelt: false,
+            container_runtime: None,
+        }
+    }
+
+    #[test]
+    fn cgroup_limits_are_claimed_only_by_container_runtimes() {
+        let linux = namespaces();
+        assert!(!linux.controls().contains(&"cgroup_limits"));
+        let container = Capabilities {
+            container_runtime: Some("docker".into()),
+            ..namespaces()
+        };
+        let c = container.controls();
+        assert!(c.contains(&"cgroup_limits"));
+        // Everything the namespaces backend claims, the container claims.
+        for control in linux.controls() {
+            assert!(c.contains(&control), "{control}");
+        }
+        let no_limits = Capabilities {
+            cgroup_v2: false,
+            ..container
+        };
+        assert!(!no_limits.controls().contains(&"cgroup_limits"));
     }
 }

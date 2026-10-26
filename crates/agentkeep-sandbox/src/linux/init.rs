@@ -69,7 +69,7 @@ pub fn main(plan_fd: i32, sync_fd: i32, status_fd: i32) -> ! {
         setup_and_spawn(&plan)
     })();
 
-    let mut child = match result {
+    let child = match result {
         Ok(child) => child,
         Err(msg) => {
             let _ = writeln!(status, "ERR {msg}");
@@ -85,12 +85,23 @@ pub fn main(plan_fd: i32, sync_fd: i32, status_fd: i32) -> ! {
     sys::ignore_signal(libc::SIGINT);
     sys::ignore_signal(libc::SIGHUP);
 
+    sys::exit_now(reap(child, &[libc::SIGTERM]))
+}
+
+/// Reap every process in the sandbox's pid namespace until the command
+/// exits, forwarding each signal in `forward` (recorded with
+/// [`sys::record_signal`]) to it. When the command is done, everything
+/// still running is killed. Returns the command's shell-style exit code.
+///
+/// Shared by the namespaces init and the container init, which are both
+/// PID 1 of their pid namespace.
+pub fn reap(mut child: std::process::Child, forward: &[libc::c_int]) -> i32 {
     let agent_pid = i32::try_from(child.id()).unwrap_or(0);
     let mut agent_status: Option<i32> = None;
     loop {
         let pending = sys::PENDING_SIGNAL.swap(0, std::sync::atomic::Ordering::SeqCst);
-        if pending == libc::SIGTERM {
-            let _ = sys::kill(agent_pid, libc::SIGTERM);
+        if pending != 0 && forward.contains(&pending) {
+            let _ = sys::kill(agent_pid, pending);
         }
         match sys::wait_any() {
             Ok(Some((pid, st))) => {
@@ -106,12 +117,11 @@ pub fn main(plan_fd: i32, sync_fd: i32, status_fd: i32) -> ! {
     }
     // Keep std from trying to wait again.
     let _ = child.try_wait();
-    let code = match agent_status.map(sys::decode_status) {
+    match agent_status.map(sys::decode_status) {
         Some(crate::ExitStatus::Code(c)) => c,
         Some(crate::ExitStatus::Signal(s)) => 128 + s,
         _ => 1,
-    };
-    sys::exit_now(code)
+    }
 }
 
 fn setup_and_spawn(plan: &LaunchPlan) -> Result<std::process::Child, String> {
@@ -143,6 +153,13 @@ fn setup_and_spawn(plan: &LaunchPlan) -> Result<std::process::Child, String> {
         seccomp::apply()?;
     }
 
+    spawn_command(plan)
+}
+
+/// Start the command with exactly the plan's environment and working
+/// directory, inheriting stdio. The caller has already confined itself;
+/// the child inherits every restriction.
+pub fn spawn_command(plan: &LaunchPlan) -> Result<std::process::Child, String> {
     let (prog, args) = plan.command.split_first().ok_or("empty command")?;
     let mut cmd = Command::new(prog);
     cmd.args(args)
