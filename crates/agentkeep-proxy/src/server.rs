@@ -17,7 +17,7 @@ use hyper::body::{Body, Frame, Incoming};
 use hyper::service::service_fn;
 use hyper::upgrade::OnUpgrade;
 use hyper_util::rt::TokioIo;
-use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, ReadBuf};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
@@ -151,17 +151,17 @@ async fn handle_connect(state: Arc<State>, mut req: Request<Incoming>) -> Respon
             .insert(CONNECTION, http::HeaderValue::from_static("close"));
         return resp;
     }
-    // Only TLS ports are terminated; anything else is tunnelled as-is.
-    let inspect = state.config.tls_inspect
-        && !is_passthrough(&state, &host, port)
-        && state.config.inspect_ports.contains(&port);
+    // What the tunnel carries is decided by its first bytes, not by the
+    // port: a port list let `CONNECT allowed.host:80` plus plaintext HTTP,
+    // or TLS on any port but 443/8443, leave without a scan (N2).
+    let inspect = state.config.tls_inspect && !is_passthrough(&state, &host, port);
     let on_upgrade = hyper::upgrade::on(&mut req);
     tokio::spawn(async move {
         match on_upgrade.await {
             Ok(upgraded) => {
                 let io = TokioIo::new(upgraded);
                 if inspect {
-                    inspect_tunnel(state, io, host, port).await;
+                    sniffed_tunnel(state, io, host, port).await;
                 } else {
                     passthrough_tunnel(state, io, host, port).await;
                 }
@@ -196,6 +196,152 @@ where
     let result = tokio::io::copy_bidirectional(&mut client, &mut origin).await;
     let (up, down) = result.unwrap_or((0, 0));
     state.hooks.log("net.tunnel.end", serde_json::json!({ "host": host, "port": port, "bytes_out": up, "bytes_in": down, "inspected": false }));
+}
+
+/// What the first byte of a tunnel says it carries.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Sniffed {
+    /// A TLS handshake record: terminate and inspect.
+    Tls,
+    /// An HTTP/1 request line (method tokens are upper-case ASCII): scan
+    /// it like any plain request. Anything else that starts this way is
+    /// rejected by the HTTP parser, which is the fail-closed outcome.
+    Http,
+    /// Neither: cannot be scanned.
+    Other,
+}
+
+/// Classify a tunnel by its first byte.
+pub fn sniff(first: u8) -> Sniffed {
+    match first {
+        0x16 => Sniffed::Tls,
+        b'A'..=b'Z' => Sniffed::Http,
+        _ => Sniffed::Other,
+    }
+}
+
+/// How long a client may stay silent after `200 Connection established`.
+/// Server-speaks-first protocols cannot be classified and need passthrough.
+const SNIFF_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// An inspected tunnel: TLS is terminated, plaintext HTTP is scanned, and
+/// anything else is refused, because forwarding bytes the scanner cannot
+/// read would be a silent DLP bypass. Hosts that need other protocols go
+/// in `network.passthrough`, where the audit log says they were unscanned.
+async fn sniffed_tunnel<C>(state: Arc<State>, mut client: C, host: String, port: u16)
+where
+    C: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+{
+    let mut first = vec![0u8; 4096];
+    let n = match tokio::time::timeout(SNIFF_TIMEOUT, client.read(&mut first)).await {
+        Ok(Ok(0) | Err(_)) => return,
+        Ok(Ok(n)) => n,
+        Err(_) => {
+            refuse_tunnel(
+                &state,
+                &host,
+                port,
+                "client sent nothing; server-first protocols cannot be inspected",
+            );
+            return;
+        }
+    };
+    first.truncate(n);
+    let kind = sniff(first[0]);
+    let client = Rewind::new(Bytes::from(first), client);
+    match kind {
+        Sniffed::Tls => inspect_tunnel(state, client, host, port).await,
+        Sniffed::Http => {
+            let svc = service_fn(move |req| {
+                let state = Arc::clone(&state);
+                let host = host.clone();
+                async move {
+                    Ok::<_, std::convert::Infallible>(
+                        forward(state, req, host, port, false, true).await,
+                    )
+                }
+            });
+            let conn = hyper::server::conn::http1::Builder::new()
+                .preserve_header_case(true)
+                .serve_connection(TokioIo::new(client), svc)
+                .with_upgrades();
+            let _ = conn.await;
+        }
+        Sniffed::Other => refuse_tunnel(
+            &state,
+            &host,
+            port,
+            "tunnel carries neither TLS nor HTTP and cannot be scanned",
+        ),
+    }
+}
+
+fn refuse_tunnel(state: &State, host: &str, port: u16, why: &str) {
+    state.hooks.log(
+        "net.deny",
+        serde_json::json!({
+            "host": host, "port": port,
+            "rule": format!("{why}; list the host in network.passthrough to tunnel it unscanned"),
+        }),
+    );
+}
+
+/// A stream with bytes already read from it put back in front.
+struct Rewind<S> {
+    prefix: Bytes,
+    inner: S,
+}
+
+impl<S> Rewind<S> {
+    fn new(prefix: Bytes, inner: S) -> Self {
+        Self { prefix, inner }
+    }
+}
+
+impl<S: AsyncRead + Unpin> AsyncRead for Rewind<S> {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        if !this.prefix.is_empty() {
+            let n = this.prefix.len().min(buf.remaining());
+            buf.put_slice(&this.prefix.split_to(n));
+            return Poll::Ready(Ok(()));
+        }
+        Pin::new(&mut this.inner).poll_read(cx, buf)
+    }
+}
+
+impl<S: AsyncWrite + Unpin> AsyncWrite for Rewind<S> {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write(cx, buf)
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_flush(cx)
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Pin::new(&mut self.get_mut().inner).poll_shutdown(cx)
+    }
+
+    fn poll_write_vectored(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+        bufs: &[std::io::IoSlice<'_>],
+    ) -> Poll<std::io::Result<usize>> {
+        Pin::new(&mut self.get_mut().inner).poll_write_vectored(cx, bufs)
+    }
+
+    fn is_write_vectored(&self) -> bool {
+        self.inner.is_write_vectored()
+    }
 }
 
 async fn inspect_tunnel<C>(state: Arc<State>, client: C, host: String, port: u16)

@@ -89,13 +89,13 @@ pub struct DlpConfig {
 /// Proxy configuration.
 #[derive(Debug, Clone)]
 pub struct Config {
-    /// Terminate TLS and scan.
+    /// Inspect `CONNECT` tunnels: terminate TLS and scan it, scan plaintext
+    /// HTTP, refuse anything else. When false every tunnel is passed
+    /// through unscanned (and logged as such).
     pub tls_inspect: bool,
-    /// Allowed hosts exempt from inspection.
+    /// Allowed hosts exempt from inspection; their tunnels may carry any
+    /// protocol.
     pub passthrough: Vec<String>,
-    /// Ports on which a `CONNECT` tunnel is assumed to carry TLS and is
-    /// terminated for inspection. Other ports are tunnelled unscanned.
-    pub inspect_ports: Vec<u16>,
     /// Permit destinations in private, loopback and link-local ranges.
     pub allow_private: bool,
     /// Extra PEM files whose certificates are trusted for origins.
@@ -111,7 +111,6 @@ impl Default for Config {
         Self {
             tls_inspect: true,
             passthrough: Vec::new(),
-            inspect_ports: vec![443, 8443],
             allow_private: false,
             trusted_cas: Vec::new(),
             dlp: DlpConfig {
