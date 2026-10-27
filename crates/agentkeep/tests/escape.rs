@@ -322,11 +322,17 @@ mod suite {
             argv: &[&str],
             env: &[(&str, &str)],
         ) -> Logged {
+            let script = match argv {
+                ["sh", "-c", script] => started(script),
+                ["sh", file] => started(&format!("sh {file}")),
+                _ => panic!("run_logged takes `sh -c <script>` or `sh <file>`: {argv:?}"),
+            };
             let before = self.session_dirs();
             let output = self
-                .command(wrapper, extra_policy, argv, env)
+                .command(wrapper, extra_policy, &["sh", "-c", &script], env)
                 .output()
                 .expect("spawn agentkeep");
+            assert_started(&output);
             let new: Vec<PathBuf> = self.session_dirs().difference(&before).cloned().collect();
             assert_eq!(new.len(), 1, "expected one new session:\n{}", out(&output));
             let path = new[0].join("events.jsonl");
@@ -338,8 +344,8 @@ mod suite {
                 events,
                 raw,
             };
-            // Liveness, as in `run`: a launch that failed ends the session
-            // with an `error`, and then nothing below it was exercised.
+            // A launch that failed ends the session with an `error`; the
+            // sentinel above proves the shell inside ran as well.
             let ends = logged.of("session.end");
             assert!(
                 ends.len() == 1 && ends[0].get("error").is_none(),
@@ -943,7 +949,7 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
             let ifaces: Vec<&str> = text.lines().filter(|l| l.ends_with(':')).collect();
             assert_eq!(ifaces, vec!["lo:"], "only loopback may exist:\n{text}");
         }
-        if has("python3") {
+        if tools("N3/N4 python", &["python3"]) {
             let o = h.run("", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 9)) if False else None; \ntry:\n s.connect((\"203.0.113.1\", 80)); print(\"CONNECTED\")\nexcept OSError as e: print(\"blocked\", e)'");
             assert!(!out(&o).contains("CONNECTED"), "{}", out(&o));
             // Name resolution from inside, on every backend: Linux has no
@@ -1596,8 +1602,11 @@ px --cacert .fx/origin.pem -o /dev/null -w 'unlisted=%{{http_connect}}\\n' https
         if !tools("N3", &["python3"]) {
             return;
         }
-        // Inside: no resolver is reachable, not even by raw UDP.
-        if h.requires("N3 resolver", "net_namespace") {
+        // Inside: no resolver is reachable, not even by raw UDP. With a
+        // network namespace there is no route; on macOS the profile must
+        // refuse the datagram itself (a datagram that left and got no
+        // answer would only time out).
+        if h.requires("N3 resolver", "net_isolation") {
             h.fixture(
                 "dns.py",
                 &format!(
@@ -1617,18 +1626,32 @@ for ns in ["127.0.0.53", "192.0.2.53"]:
 "#
                 ),
             );
-            let o = h.run(
-                "",
-                &format!("getent hosts {EXFIL_NAME}; echo getent-rc=$?; python3 .fx/dns.py"),
-            );
+            let netns = h.claims("net_namespace");
+            let getent = if netns {
+                format!("getent hosts {EXFIL_NAME}; echo getent-rc=$?; ")
+            } else {
+                String::new()
+            };
+            let o = h.run("", &format!("{getent}python3 .fx/dns.py"));
             let text = out(&o);
-            assert!(text.contains("getent-rc=2"), "{text}");
-            assert!(text.contains("dns-blocked 127.0.0.53"), "{text}");
-            assert!(
-                text.contains("dns-blocked 192.0.2.53 [Errno 101] Network is unreachable"),
-                "{text}"
-            );
             assert!(!text.contains("DNS-ANSWERED"), "{text}");
+            if netns {
+                assert!(text.contains("getent-rc=2"), "{text}");
+                assert!(text.contains("dns-blocked 127.0.0.53"), "{text}");
+                assert!(
+                    text.contains("dns-blocked 192.0.2.53 [Errno 101] Network is unreachable"),
+                    "{text}"
+                );
+            } else {
+                for ns in ["127.0.0.53", "192.0.2.53"] {
+                    assert!(
+                        text.contains(&format!(
+                            "dns-blocked {ns} [Errno 1] Operation not permitted"
+                        )),
+                        "{text}"
+                    );
+                }
+            }
         }
 
         // Through the proxy: a denied name is refused before the supervisor
@@ -1803,7 +1826,7 @@ s.close()
         // the pattern itself is not on the logged command line.
         h.fixture(
             "n6.sh",
-            "sed -n '/agentkeep session CA/,$p' \"$SSL_CERT_FILE\" | cksum | sed 's/^/ca:/'\ngrep -rlI -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' /run/agentkeep /tmp \"$HOME\" 2>/dev/null | sed 's/^/KEYFILE /'\necho done\n",
+            "sed -n '/agentkeep session CA/,$p' \"$SSL_CERT_FILE\" | cksum | sed 's/^/ca:/'\ngrep -rlI -e '-----BEGIN [A-Z ]*PRIVATE KEY-----' /run/agentkeep /tmp \"$TMPDIR\" \"$HOME\" \"$SSL_CERT_FILE\" 2>/dev/null | sed 's/^/KEYFILE /'\necho done\n",
         );
         let a = h.run_logged(None, "", &["sh", ".fx/n6.sh"], &[]);
         let b = h.run_logged(None, "", &["sh", ".fx/n6.sh"], &[]);
@@ -2047,7 +2070,7 @@ for p in pids:
         }
         let o = h.run("", "grep -E '^Seccomp:' /proc/self/status");
         assert!(out(&o).contains("Seccomp:\t2"), "{}", out(&o));
-        if has("python3") {
+        if tools("C5 python", &["python3"]) {
             let o = h.run(
                 "",
                 r#"python3 -c '
