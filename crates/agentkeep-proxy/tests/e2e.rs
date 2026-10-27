@@ -252,7 +252,7 @@ fn log_does_not_claim_inspection_when_dlp_is_off() {
         ..Config::default()
     };
     let p = start_proxy(cfg, &["127.0.0.1"], None);
-    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/k?AKIAIOSFODNN7EXAMPLE HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", origin.port()));
+    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/k?AKIAIOSFODNN7EXAMPLE HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n", origin.port()));
     assert!(out.contains("HTTP/1.1 200"), "DLP is off: {out}");
     assert_eq!(p.hooks.find("net.request").unwrap()["inspected"], false);
 }
@@ -264,7 +264,7 @@ fn denied_host_gets_403_without_connecting() {
     let out = raw(
         &p.socket,
         &format!(
-            "GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
             origin.port()
         ),
     );
@@ -288,7 +288,7 @@ fn origin_form_requests_are_rejected() {
 fn dlp_blocks_secret_in_header_before_connecting() {
     let origin = start_plain_origin();
     let p = start_proxy(Config::default(), &["127.0.0.1"], None);
-    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: x\r\nAuthorization: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij0\r\nConnection: close\r\n\r\n", origin.port()));
+    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij0\r\nConnection: close\r\n\r\n", origin.port()));
     assert!(out.starts_with("HTTP/1.1 403"), "{out}");
     assert!(out.contains("github_token"), "{out}");
     let block = p.hooks.find("dlp.block").unwrap();
@@ -308,7 +308,7 @@ fn dlp_blocks_secret_in_body_stream() {
     let origin = start_plain_origin();
     let p = start_proxy(Config::default(), &["127.0.0.1"], None);
     let body = "note=please keep AKIAIOSFODNN7EXAMPLE safe";
-    let out = raw(&p.socket, &format!("POST http://127.0.0.1:{}/upload HTTP/1.1\r\nHost: x\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", origin.port(), body.len()));
+    let out = raw(&p.socket, &format!("POST http://127.0.0.1:{}/upload HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", origin.port(), body.len()));
     assert!(out.starts_with("HTTP/1.1 403"), "{out}");
     assert!(out.contains("aws_access_key_id"), "{out}");
 }
@@ -318,7 +318,7 @@ fn dlp_lets_clean_bodies_and_reports_jwts() {
     let origin = start_plain_origin();
     let p = start_proxy(Config::default(), &["127.0.0.1"], None);
     let body = "hello world, nothing secret here";
-    let out = raw(&p.socket, &format!("POST http://127.0.0.1:{}/ HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.c2lnbmF0dXJlLXNpZ25hdHVyZQ\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", origin.port(), body.len()));
+    let out = raw(&p.socket, &format!("POST http://127.0.0.1:{}/ HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ0ZXN0In0.c2lnbmF0dXJlLXNpZ25hdHVyZQ\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", origin.port(), body.len()));
     assert!(out.contains("HTTP/1.1 200"), "{out}");
     assert!(out.contains(body), "{out}");
     assert_eq!(p.hooks.find("dlp.report").unwrap()["detector"], "jwt");
@@ -341,7 +341,7 @@ fn bound_secret_is_blocked_when_misrouted() {
         ..Config::default()
     };
     let p = start_proxy(cfg, &["127.0.0.1"], None);
-    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: x\r\nx-api-key: {key}\r\nConnection: close\r\n\r\n", origin.port()));
+    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: 127.0.0.1\r\nx-api-key: {key}\r\nConnection: close\r\n\r\n", origin.port()));
     assert!(out.starts_with("HTTP/1.1 403"), "{out}");
     assert!(
         out.contains("bound_secret_misrouted:ANTHROPIC_API_KEY"),
@@ -442,7 +442,7 @@ fn private_addresses_are_refused_unless_allowed() {
     let out = raw(
         &socket,
         &format!(
-            "GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n",
+            "GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
             origin.port()
         ),
     );
@@ -603,4 +603,61 @@ fn sniffing_classifies_first_bytes() {
     for b in [0u8, 0x80, b'g', b'{', b'\r'] {
         assert_eq!(sniff(b), Sniffed::Other);
     }
+}
+
+#[test]
+fn host_header_must_match_the_destination() {
+    let origin = start_plain_origin();
+    let p = start_proxy(Config::default(), &["127.0.0.1"], None);
+    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/ HTTP/1.1\r\nHost: other-tenant.example\r\nConnection: close\r\n\r\n", origin.port()));
+    assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+    assert!(out.contains("Host header does not match"), "{out}");
+    assert!(p.hooks.find("net.request").is_none());
+}
+
+#[test]
+fn metadata_addresses_are_refused_even_with_allow_private() {
+    // No connection is attempted: the address is refused after resolution.
+    let p = start_proxy(Config::default(), &["169.254.169.254"], None);
+    let out = raw(&p.socket, "GET http://169.254.169.254/latest/meta-data/ HTTP/1.1\r\nHost: 169.254.169.254\r\nConnection: close\r\n\r\n");
+    assert!(out.starts_with("HTTP/1.1 502"), "{out}");
+    assert!(out.contains("metadata"), "{out}");
+}
+
+#[test]
+fn tls_server_name_must_match_the_connect_host() {
+    let dir = tempfile::tempdir().unwrap();
+    let (origin, origin_pem) = start_tls_origin(dir.path());
+    let p = start_proxy(Config::default(), &["localhost"], Some(origin_pem));
+    let ca_pem = p.state.ca_pem().to_string();
+    // CONNECT to the allowed host, then ask the TLS layer for another name.
+    let mut s = UnixStream::connect(&p.socket).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .unwrap();
+    write!(
+        s,
+        "CONNECT localhost:{0} HTTP/1.1\r\nHost: localhost:{0}\r\n\r\n",
+        origin.port()
+    )
+    .unwrap();
+    let mut head = Vec::new();
+    let mut b = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        s.read_exact(&mut b).unwrap();
+        head.push(b[0]);
+    }
+    let cfg = client_tls_config(&ca_pem);
+    let name = rustls_pki_types::ServerName::try_from("other-tenant.example".to_string()).unwrap();
+    let conn = rustls::ClientConnection::new(cfg, name).unwrap();
+    let mut tls = rustls::StreamOwned::new(conn, s);
+    let _ =
+        tls.write_all(b"GET / HTTP/1.1\r\nHost: other-tenant.example\r\nConnection: close\r\n\r\n");
+    let mut out = Vec::new();
+    let _ = tls.read_to_end(&mut out);
+    assert!(
+        !String::from_utf8_lossy(&out).contains("echo:"),
+        "request reached the origin"
+    );
+    let deny = p.hooks.find("net.deny").expect("logged");
+    assert_eq!(deny["sni"], "other-tenant.example");
 }

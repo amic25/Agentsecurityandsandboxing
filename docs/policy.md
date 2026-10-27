@@ -68,7 +68,7 @@ audit log, split into "looked like a secret" and "other"; values never are.
 | `deny` | `[]` | Always refused. Deny beats ask beats allow |
 | `tls_inspect` | `true` | Inspect `CONNECT` tunnels on any port: TLS is decrypted and scanned, plaintext HTTP is scanned, any other protocol is refused. `false` tunnels everything unscanned |
 | `passthrough` | `[]` | Allowed hosts exempt from inspection (pinned clients, non-HTTP protocols); no DLP there, logged `inspected: false` |
-| `allow_private` | `false` | Permit private, loopback and link-local address ranges (including `169.254.169.254`) |
+| `allow_private` | `false` | Permit private and loopback address ranges. Link-local and cloud metadata addresses are always refused |
 | `trusted_cas` | `[]` | Extra PEM files the proxy trusts for origin certificates (internal CAs) |
 
 `"*"` and single-label patterns such as `*.com` are rejected as too broad.

@@ -100,6 +100,26 @@ fn flag_rules() -> Result<Vec<SeccompRule>, String> {
         .collect()
 }
 
+/// `ioctl` requests that push input into a terminal. The sandbox shares the
+/// user's terminal, so these would let a sandboxed process queue keystrokes
+/// that the user's shell reads after agentkeep exits. Compared on the low
+/// 32 bits, which is what the kernel uses for the request number.
+const TTY_INJECTION_IOCTLS: &[u64] = &[
+    libc::TIOCSTI,
+    0x541C, // TIOCLINUX: console selection paste
+];
+
+fn tty_injection_rules() -> Result<Vec<SeccompRule>, String> {
+    TTY_INJECTION_IOCTLS
+        .iter()
+        .map(|&req| {
+            let cond = SeccompCondition::new(1, SeccompCmpArgLen::Dword, SeccompCmpOp::Eq, req)
+                .map_err(|e| e.to_string())?;
+            SeccompRule::new(vec![cond]).map_err(|e| e.to_string())
+        })
+        .collect()
+}
+
 /// Build the two BPF programs: the EPERM deny-list and the ENOSYS one for
 /// `clone3`.
 pub fn programs() -> Result<Vec<BpfProgram>, String> {
@@ -108,6 +128,7 @@ pub fn programs() -> Result<Vec<BpfProgram>, String> {
         deny.insert(nr, vec![]);
     }
     deny.insert(libc::SYS_unshare, flag_rules()?);
+    deny.insert(libc::SYS_ioctl, tty_injection_rules()?);
     deny.insert(libc::SYS_clone, flag_rules()?);
     let eperm = SeccompFilter::new(
         deny,

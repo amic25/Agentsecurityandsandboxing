@@ -277,7 +277,11 @@ fn decide_exec(shared: &Arc<Shared>, argv: &[String], cwd: &str) -> ExecReply {
 /// only if the policy lists that transport. Timeout or no transport: deny.
 fn ask(shared: &Arc<Shared>, prompt: &str, rule: &str) -> bool {
     if shared.no_ask {
-        ui::warn(&format!("denied (--no-ask): {prompt} [{rule}]"));
+        ui::warn(&format!(
+            "denied (--no-ask): {} [{}]",
+            printable(prompt),
+            printable(rule)
+        ));
         return false;
     }
     for t in &shared.transports {
@@ -294,7 +298,11 @@ fn ask(shared: &Arc<Shared>, prompt: &str, rule: &str) -> bool {
             }
         }
     }
-    ui::warn(&format!("denied (no approver answered): {prompt} [{rule}]"));
+    ui::warn(&format!(
+        "denied (no approver answered): {} [{}]",
+        printable(prompt),
+        printable(rule)
+    ));
     false
 }
 
@@ -311,8 +319,8 @@ fn ask_approvers(shared: &Arc<Shared>, prompt: &str, rule: &str) -> Option<bool>
     while i < approvers.len() {
         let msg = serde_json::to_string(&PromptMessage {
             id,
-            prompt: prompt.into(),
-            rule: rule.into(),
+            prompt: printable(prompt),
+            rule: printable(rule),
         })
         .ok()?;
         let ok = writeln!(approvers[i], "{msg}").is_ok();
@@ -346,7 +354,26 @@ fn ask_approvers(shared: &Arc<Shared>, prompt: &str, rule: &str) -> Option<bool>
     None
 }
 
+/// Make text safe to show a human: control characters (escape sequences,
+/// carriage returns, backspaces) are shown as escapes instead of acting on
+/// the terminal, so sandbox-supplied text cannot redraw or hide what is
+/// being approved.
+pub fn printable(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for c in text.chars() {
+        if c.is_control()
+            || matches!(c, '\u{2028}' | '\u{2029}' | '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}')
+        {
+            out.extend(c.escape_default());
+        } else {
+            out.push(c);
+        }
+    }
+    out
+}
+
 fn ask_tty(prompt: &str, rule: &str, timeout: Duration) -> Option<bool> {
+    let (prompt, rule) = (printable(prompt), printable(rule));
     let mut tty = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
@@ -396,8 +423,8 @@ pub fn approve_client(_globals: &Globals, args: &ApproveArgs) -> Result<ExitCode
         eprint!(
             "{} {}\n  rule: {}\n  allow? [y/N] ",
             ui::bold("[agentkeep]"),
-            p.prompt,
-            p.rule
+            printable(&p.prompt),
+            printable(&p.rule)
         );
         let mut answer = String::new();
         stdin.lock().read_line(&mut answer)?;
@@ -409,4 +436,19 @@ pub fn approve_client(_globals: &Globals, args: &ApproveArgs) -> Result<ExitCode
         writeln!(stream, "{}", serde_json::to_string(&reply)?)?;
     }
     Ok(ExitCode::SUCCESS)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::printable;
+
+    #[test]
+    fn prompts_cannot_drive_the_terminal() {
+        let hostile = "run `git status`?\x1b[2K\r\x1b[1Arun `ls`?\u{202e}";
+        let shown = printable(hostile);
+        assert!(!shown.chars().any(char::is_control), "{shown:?}");
+        assert!(shown.contains("\\u{1b}"), "{shown}");
+        assert!(!shown.contains('\u{202e}'), "{shown}");
+        assert_eq!(printable("git push origin main"), "git push origin main");
+    }
 }

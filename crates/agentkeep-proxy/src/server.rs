@@ -22,7 +22,9 @@ use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 
 use crate::dlp::{Action, BodyScanner, Finding};
-use crate::hosts::{is_non_public, pattern_matches, split_host_port};
+use crate::hosts::{
+    host_header_name, is_metadata, is_non_public, pattern_matches, split_host_port,
+};
 use crate::{State, Verdict};
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
@@ -356,6 +358,19 @@ where
             return;
         }
     };
+    // The policy decision was made for the CONNECT host; a client that then
+    // names a different server in SNI is trying to reach something else.
+    let sni = tls.get_ref().1.server_name().map(str::to_ascii_lowercase);
+    if sni.as_deref().is_some_and(|s| s != host) {
+        state.hooks.log(
+            "net.deny",
+            serde_json::json!({
+                "host": host, "port": port, "sni": sni,
+                "rule": "TLS server name does not match the CONNECT destination",
+            }),
+        );
+        return;
+    }
     let svc = service_fn(move |req| {
         let state = Arc::clone(&state);
         let host = host.clone();
@@ -380,6 +395,12 @@ async fn connect_origin(state: &State, host: &str, port: u16) -> Result<TcpStrea
         .collect();
     if addrs.is_empty() {
         return Err(format!("resolve {host}: no addresses"));
+    }
+    if let Some(a) = addrs.iter().find(|a| is_metadata(a.ip())) {
+        return Err(format!(
+            "{host} resolves to {}, a cloud metadata or link-local address; agentkeep never connects there",
+            a.ip()
+        ));
     }
     if !state.config.allow_private {
         if let Some(a) = addrs.iter().find(|a| is_non_public(a.ip())) {
@@ -449,6 +470,23 @@ async fn forward(
         .path_and_query()
         .map_or_else(|| "/".to_string(), |p| p.as_str().to_string());
     let path_only = req.uri().path().to_string();
+
+    // Origins route on the Host header. It must name the destination the
+    // policy allowed, or an allowed shared front end (a CDN, a cloud load
+    // balancer) could be steered to a different tenant.
+    if let Some(value) = req.headers().get(HOST) {
+        let named = value.to_str().ok().and_then(host_header_name);
+        if named.as_deref() != Some(host.as_str()) {
+            state.hooks.log("net.deny", serde_json::json!({
+                "host": host, "port": port, "host_header": String::from_utf8_lossy(value.as_bytes()),
+                "rule": "Host header does not match the destination",
+            }));
+            return text_response(
+                StatusCode::FORBIDDEN,
+                format!("agentkeep: Host header does not match the destination {host}\n"),
+            );
+        }
+    }
 
     // Secrets in the request line or headers never reach the origin.
     if let Some(scanner) = &state.scanner {

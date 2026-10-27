@@ -65,12 +65,15 @@ four exit with status 70.
   this so a change is deliberate.
 - Inspection needs SNI: HTTPS to an IP literal through an inspected tunnel
   fails the handshake. Use a name or `passthrough`.
-- The `CONNECT` host decides the destination; the inner `Host` header and
-  SNI are not cross-checked against it. Domain fronting through an allowed
-  CDN reaches whatever that CDN routes the `Host` header to.
-- `network.allow_private = true` opens every private, loopback and
-  link-local range to allowed names, including cloud metadata at
-  `169.254.169.254` if it is allowed. There is no separate metadata block.
+- The `CONNECT` host decides the destination, and the TLS server name and
+  the `Host` header must both match it. This stops steering an allowed
+  shared front end (a CDN or cloud load balancer) to another tenant by
+  name, but not by other means a front end may offer (for example a path
+  or header it routes on).
+- `network.allow_private = true` opens private and loopback ranges to
+  allowed names. Link-local and cloud metadata addresses (`169.254.0.0/16`,
+  `100.100.100.200`, `fd00:ec2::254`, `fe80::/10`) stay refused; there is
+  no setting that opens them.
 - A secret passed with `env.pass` is bound to its provider's API host only
   for well-known names (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN`,
   ...). Any other name without a `dlp.allow_provider_keys_to` entry may be

@@ -54,6 +54,29 @@ pub fn is_non_public(ip: IpAddr) -> bool {
     }
 }
 
+/// Cloud instance-metadata and other link-local service addresses. These
+/// hand out credentials to anything that asks, so the proxy refuses them
+/// unconditionally: `network.allow_private` does not lift this (N5).
+pub fn is_metadata(ip: IpAddr) -> bool {
+    match ip {
+        IpAddr::V4(v4) => {
+            v4.is_link_local() // 169.254.0.0/16: AWS, GCP, Azure, OpenStack, ECS
+                || v4.octets() == [100, 100, 100, 200] // Alibaba Cloud
+        }
+        IpAddr::V6(v6) => {
+            v6.segments() == [0xfd00, 0x0ec2, 0, 0, 0, 0, 0, 0x0254] // AWS IPv6 IMDS
+                || (v6.segments()[0] & 0xffc0) == 0xfe80 // link local
+                || v6.to_ipv4_mapped().is_some_and(|v4| is_metadata(IpAddr::V4(v4)))
+        }
+    }
+}
+
+/// The host part of a `Host` header value, lower-cased, without a port or
+/// IPv6 brackets.
+pub fn host_header_name(value: &str) -> Option<String> {
+    split_host_port(value, 0).map(|(h, _)| h)
+}
+
 /// Does `pattern` (`host`, `*.suffix`, optionally `:port`) match?
 pub fn pattern_matches(pattern: &str, host: &str, port: u16) -> bool {
     let (pat_host, pat_port) = match pattern.rsplit_once(':') {
@@ -121,6 +144,33 @@ mod tests {
             let expect = ip != "203.0.113.1";
             assert_eq!(!is_non_public(ip.parse().unwrap()), expect, "{ip}");
         }
+    }
+
+    #[test]
+    fn metadata_addresses() {
+        for ip in [
+            "169.254.169.254",
+            "169.254.170.2",
+            "100.100.100.200",
+            "fd00:ec2::254",
+            "fe80::1",
+            "::ffff:169.254.169.254",
+        ] {
+            assert!(is_metadata(ip.parse().unwrap()), "{ip}");
+        }
+        for ip in ["10.0.0.1", "127.0.0.1", "8.8.8.8", "::1"] {
+            assert!(!is_metadata(ip.parse().unwrap()), "{ip}");
+        }
+    }
+
+    #[test]
+    fn host_header_names() {
+        assert_eq!(
+            host_header_name("Example.com:8443").as_deref(),
+            Some("example.com")
+        );
+        assert_eq!(host_header_name("[::1]:80").as_deref(), Some("::1"));
+        assert_eq!(host_header_name("").as_deref(), None);
     }
 
     #[test]

@@ -1201,19 +1201,35 @@ px -p -w 'metadata_tunnel=%{{http_code}}\\n' http://169.254.169.254/latest/meta-
             "{text}"
         );
         assert!(
-            text.contains("169.254.169.254 resolves to non-public address 169.254.169.254"),
+            text.contains("169.254.169.254 resolves to 169.254.169.254, a cloud metadata or link-local address"),
             "{text}"
         );
         assert_eq!(o.connections(), 0, "private origin was contacted");
         let errors = l.of("net.error");
         assert!(
             errors.len() >= 4
-                && errors.iter().all(|e| e["error"]
-                    .as_str()
-                    .unwrap_or_default()
-                    .contains("non-public")),
+                && errors.iter().all(|e| {
+                    let msg = e["error"].as_str().unwrap_or_default();
+                    msg.contains("non-public") || msg.contains("cloud metadata")
+                }),
             "{}",
             l.raw
+        );
+        assert!(l.of("net.request").is_empty(), "{}", l.raw);
+
+        // allow_private opens the LAN, never instance metadata.
+        let policy = "[network]\nallow = [\"169.254.169.254\"]\nallow_private = true\n";
+        let script = format!(
+            "{PX}px -w 'metadata=%{{http_code}}\\n' http://169.254.169.254/latest/meta-data/
+px -p -w 'metadata_tunnel=%{{http_code}}\\n' http://169.254.169.254/latest/meta-data/"
+        );
+        let l = h.run_logged(None, policy, &["sh", "-c", &script], &[]);
+        let text = l.text();
+        assert!(text.contains("metadata=502"), "{text}");
+        assert!(text.contains("metadata_tunnel=502"), "{text}");
+        assert!(
+            text.contains("cloud metadata or link-local address"),
+            "{text}"
         );
         assert!(l.of("net.request").is_empty(), "{}", l.raw);
     }
@@ -1602,6 +1618,31 @@ r = libc.syscall(nr, 0, None, 0); print("bpf", r, os.strerror(ctypes.get_errno()
             );
             assert!(text.contains("bpf -1 Operation not permitted"), "{text}");
         }
+    }
+
+    #[test]
+    fn c5_terminal_input_injection_is_refused() {
+        // The sandbox shares the user's terminal; the ioctls that push input
+        // into it must fail so nothing is queued for the user's shell.
+        let Some(h) = harness("C5 tty") else { return };
+        if !h.requires("C5 tty", "seccomp") || !tools("C5 tty", &["python3"]) {
+            return;
+        }
+        let o = h.run(
+            "",
+            r#"python3 -c '
+import fcntl, os, termios
+for fd in (0, 1, 2):
+    try:
+        fcntl.ioctl(fd, termios.TIOCSTI, b"x")
+        print("TIOCSTI-ALLOWED", fd)
+    except OSError as e:
+        print("tiocsti", fd, os.strerror(e.errno))
+'"#,
+        );
+        let text = out(&o);
+        assert!(!text.contains("TIOCSTI-ALLOWED"), "{text}");
+        assert_eq!(text.matches("Operation not permitted").count(), 3, "{text}");
     }
 
     #[test]

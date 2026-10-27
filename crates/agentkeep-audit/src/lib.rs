@@ -119,20 +119,28 @@ impl Writer {
     /// Create `dir/events.jsonl` (the directory too) and start a chain.
     /// Fails if the file already exists: sessions are never appended to by
     /// a second writer.
+    ///
+    /// On Unix the session directory is created `0700` and the log `0600`:
+    /// it records commands, paths and hosts, which other local users have
+    /// no business reading.
     pub fn create(dir: &Path) -> Result<Self, Error> {
-        fs::create_dir_all(dir).map_err(|e| Error::Io {
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true);
+        #[cfg(unix)]
+        std::os::unix::fs::DirBuilderExt::mode(&mut builder, 0o700);
+        builder.create(dir).map_err(|e| Error::Io {
             path: dir.to_path_buf(),
             source: e,
         })?;
         let path = dir.join(EVENTS_FILE);
-        let file = OpenOptions::new()
-            .append(true)
-            .create_new(true)
-            .open(&path)
-            .map_err(|e| Error::Io {
-                path: path.clone(),
-                source: e,
-            })?;
+        let mut options = OpenOptions::new();
+        options.append(true).create_new(true);
+        #[cfg(unix)]
+        std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+        let file = options.open(&path).map_err(|e| Error::Io {
+            path: path.clone(),
+            source: e,
+        })?;
         Ok(Self {
             path,
             file,
@@ -261,6 +269,18 @@ mod tests {
             2,
             "truncation shortens but keeps the chain valid; the writer's final hash detects it"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn log_is_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("s");
+        let w = Writer::create(&session).unwrap();
+        let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(w.path()), 0o600);
+        assert_eq!(mode(&session), 0o700);
     }
 
     #[test]
