@@ -2332,9 +2332,11 @@ except OSError as e:
     #[test]
     fn positive_control_project_is_writable_and_tools_work() {
         let Some(h) = harness("control") else { return };
-        let o = h.run("", "echo changed > README.md && ls /usr/bin | head -1 >/dev/null && git log --oneline -0 >/dev/null 2>&1; echo rc=$?; echo \"$HOME\" \"$USER\" \"$(pwd)\"; touch \"$HOME/.agentkeep-probe\" && echo home-writable");
+        let o = h.run("", "echo changed > README.md && ls /usr/bin | head -1 >/dev/null && git rev-parse --git-dir >/dev/null 2>&1; echo rc=$?; echo \"$HOME\" \"$USER\" \"$(pwd)\"; touch \"$HOME/.agentkeep-probe\" && echo home-writable");
         let text = out(&o);
         assert!(o.status.success(), "{text}");
+        // The write, a system binary and git inside the project all worked.
+        assert!(text.contains("rc=0"), "{text}");
         assert_eq!(
             fs::read_to_string(h.project.join("README.md")).unwrap(),
             "changed\n"
