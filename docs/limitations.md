@@ -142,15 +142,18 @@ four exit with status 70.
 
 ## macOS backend
 
-**Status: implemented, UNVERIFIED.** The backend (`crates/agentkeep-sandbox/src/macos/`)
-was written without access to a Mac. Its profile generator, environment
-rewriting and proxy relay are unit-tested on Linux; the code that runs
-`sandbox-exec` has only been compiled for `aarch64-apple-darwin` and
-`x86_64-apple-darwin`. Everything below about how macOS behaves is what the
-profile is designed to do; it becomes a tested claim only when the escape
-suite passes on the macOS CI runners (`AGENTKEEP_ESCAPE_BACKEND=macos`,
-`AGENTKEEP_REQUIRE_SANDBOX=1`). Until then treat this backend as
-experimental.
+**Status: implemented; verified on the CI runners for the controls it
+claims.** The escape suite passes against this backend
+(`AGENTKEEP_ESCAPE_BACKEND=macos`, `AGENTKEEP_REQUIRE_SANDBOX=1`) on
+GitHub's macOS 15.7 runners, Apple Silicon and Intel, as a non-root user.
+The backend claims `fs_denied`, `net_isolation`, `no_core_dumps` and
+`nproc_per_user`. Of the 43 tests, 6 are not applicable there (they need
+rlimits, seccomp, ptrace or mount filtering, or `strace` for S5) and 8 skip
+one part for the same reasons (paths absent rather than denied, pid and
+network namespaces, hardlinks, the in-sandbox resolver probe, tracing).
+That is the whole of its verification: it was written without a Mac and
+has run only on those runners, never interactively and never on another
+macOS version. Items marked UNVERIFIED below still are.
 
 How it works: a Seatbelt (SBPL) profile is generated per session, written
 with mode 0600 into the session's scratch directory, compiled once against
@@ -240,9 +243,9 @@ is inherited by every child process.
   through Security.framework cannot verify certificates (inspected
   connections fail closed; such hosts can go in `network.passthrough`,
   which still needs `trustd` and so still fails); file watchers based on
-  FSEvents receive nothing. Whether `opendirectoryd` would answer a host
-  name lookup for the sandbox is UNVERIFIED; the escape suite's DNS probe
-  checks for it.
+  FSEvents receive nothing. `opendirectoryd` does not resolve host names
+  for the sandbox on the CI runners: `getaddrinfo` inside fails
+  (`n3_n4_no_network_and_no_dns`).
 - **System files.** `/usr`, `/bin`, `/sbin`, `/System`, `/Library` (not
   `~/Library`), `/private/etc`, `/private/var/db/timezone`,
   `/private/var/select`, the active Xcode or Command Line Tools developer

@@ -63,15 +63,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Phase 2: `proxy_inputs` fuzz target for DLP scanning and destination
   parsing, and a property test that streaming never misses a secret the
   whole-buffer scan blocks.
-- Phase 2 (experimental, UNVERIFIED until macOS CI passes): macOS backend
-  (`macos`): a Seatbelt profile generated per session and applied with
+- Phase 2: macOS backend (`macos`), verified by the escape suite on the
+  macOS 15 CI runners (Apple Silicon and Intel) for the controls it claims:
+  a Seatbelt profile generated per session and applied with
   `sandbox-exec`; project and private `HOME`/`TMPDIR` read-write, system
   paths read-only, hidden paths denied even under allowed parents; network
   only through a supervisor-side loopback relay to the egress proxy; command
   shims on macOS; own process group with `RLIMIT_CORE=0` and an approximate
   per-user `RLIMIT_NPROC`. Escape suite made portable (absolute-path probes,
-  host loopback, DNS, proxy positive control, fork cap, service managers)
-  and required on the macOS CI runners. See `docs/limitations.md`.
+  host loopback, DNS, fork cap, service managers) and required on the
+  macOS CI runners. The profile lets processes list `/` (dyld needs it on
+  macOS 15). See `docs/limitations.md`.
+- Escape suite: every run must show that the sandboxed command started (a
+  sentinel printed first, and a session that launched without error), so
+  tests that only assert absence cannot pass when the sandbox never
+  starts. The suite has 43 tests.
 - Phase 1: policy engine (`agentkeep-policy`) with layered merge,
   tightening-only semantics, `[override]` acknowledgement and a pure
   `decide()`; `agentkeep policy init|show|check`; `agentkeep doctor`.

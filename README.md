@@ -8,13 +8,14 @@ agentkeep is a drop-in security layer for AI coding and personal agents
 binary, one policy file, the same rules on every agent and every OS.
 
 > **Status: pre-alpha, Phase 2.** `agentkeep run` sandboxes a command on
-> Linux, with namespaces, Landlock and seccomp, or in a Podman/Docker
-> container (`--backend container`). Network traffic goes through an egress
-> proxy with a domain allowlist, TLS inspection and outbound secret
-> detection. The policy engine, approval prompts and the redacted, hash-chained
-> audit log work, and 38 escape tests run against both backends in CI. Not
-> implemented yet: the macOS and Windows backends, agent presets, the
-> scanner, the MCP gateway, and the log viewer and reports. Check `PLAN.md`
+> Linux (namespaces, Landlock, seccomp), in a Podman/Docker container
+> (`--backend container`), or on macOS with Seatbelt (weaker than Linux;
+> see `docs/limitations.md`). Network traffic goes through an egress proxy
+> with a domain allowlist, TLS inspection and outbound secret detection.
+> The policy engine, approval prompts and the redacted, hash-chained audit
+> log work, and 43 escape tests run against all three backends in CI. Not
+> implemented yet: Windows, agent presets, the scanner, the MCP gateway,
+> and the log viewer and reports. Check `PLAN.md`
 > for when each lands and `CHANGELOG.md` for what has landed.
 
 <!-- demo GIF lands in Phase 6: an injected README tries to steal ~/.ssh and agentkeep blocks it -->
@@ -42,7 +43,7 @@ deny-by-default filesystem, environment, network and MCP controls.
 | `agentkeep scan` | Static scanner for agent attack surfaces: hidden Unicode, instructions aimed at agents, exfiltration beacons, `curl \| sh`, over-broad permissions, unsafe CI workflows. Text, JSON and SARIF output, plus a GitHub Action. |
 | `agentkeep log` / `report` | Append-only, hash-chained audit log of every command, write, request, MCP call and policy decision, with a terminal viewer and shareable reports. |
 
-## Try it today (Linux)
+## Try it today (Linux or macOS)
 
 ```sh
 cargo build --release
