@@ -56,7 +56,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
                     eprintln!("  {name}: {reason}");
                 }
             }
-            eprintln!("  (macOS and container backends land in Phase 2)");
+            eprintln!("  (the container backend needs a working podman or docker on a Linux host; the macOS backend lands in Phase 2; details: agentkeep doctor)");
             return Ok(ExitCode::from(EXIT_NO_BACKEND));
         }
     };

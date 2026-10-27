@@ -5,8 +5,9 @@
 //! [`Capabilities`]; the caller compares that with the policy and refuses to
 //! run (or runs with recorded degradations) when they disagree.
 //!
-//! Only the Linux backend exists so far. On other operating systems every
-//! backend probes as unavailable and `agentkeep run` says so.
+//! Linux hosts have two backends: `linux` (namespaces, preferred) and
+//! `container` (Podman or Docker through their CLI). On other operating
+//! systems no backend is compiled in yet and `agentkeep run` says so.
 //!
 //! `unsafe` is confined to `linux::sys`; every block carries a `SAFETY`
 //! comment. Everything else in this crate forbids it.
@@ -16,6 +17,8 @@
 pub mod plan;
 pub mod probe;
 
+#[cfg(target_os = "linux")]
+pub mod container;
 #[cfg(target_os = "linux")]
 pub mod linux;
 
@@ -150,7 +153,12 @@ pub fn linux_inner_uid() -> u32 {
 pub fn backends() -> Vec<Box<dyn Backend>> {
     #[cfg(target_os = "linux")]
     {
-        vec![Box::new(linux::LinuxBackend)]
+        // `auto` takes the first available one: namespaces need no daemon
+        // and start in milliseconds, so they win when the kernel allows them.
+        vec![
+            Box::new(linux::LinuxBackend),
+            Box::new(container::ContainerBackend::default()),
+        ]
     }
     #[cfg(not(target_os = "linux"))]
     {

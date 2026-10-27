@@ -15,9 +15,9 @@ use crate::plan::{LaunchPlan, Mount, MountMode};
 use super::sys;
 
 /// Default tmpfs sizes (bytes) when the plan does not say.
-const HOME_TMPFS_SIZE: u64 = 512 << 20;
-const TMP_TMPFS_SIZE: u64 = 2 << 30;
-const SMALL_TMPFS_SIZE: u64 = 64 << 20;
+pub(crate) const HOME_TMPFS_SIZE: u64 = 512 << 20;
+pub(crate) const TMP_TMPFS_SIZE: u64 = 2 << 30;
+pub(crate) const SMALL_TMPFS_SIZE: u64 = 64 << 20;
 
 fn step<T>(what: &str, r: io::Result<T>) -> Result<T, String> {
     r.map_err(|e| format!("{what}: {e}"))

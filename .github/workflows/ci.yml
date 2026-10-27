@@ -96,6 +96,50 @@ jobs:
             echo "stub returned success" >&2; exit 1
           fi
 
+  escape-container:
+    # The full escape suite against the container backend. Docker (rootful,
+    # preinstalled on the runner) is required to pass; rootless Podman with
+    # crun on cgroup v2 has not been verified anywhere else yet, so it runs
+    # as an experiment that reports without blocking.
+    name: escape suite (container backend, ${{ matrix.runtime }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runtime: docker
+            experimental: false
+          - runtime: podman
+            experimental: true
+    runs-on: ubuntu-24.04
+    continue-on-error: ${{ matrix.experimental }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - id: toolchain
+        run: bash scripts/toolchain-channel.sh >> "$GITHUB_OUTPUT"
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Container runtime info
+        env:
+          RUNTIME: ${{ matrix.runtime }}
+        run: '"$RUNTIME" info'
+      - name: Keep rootless runtime state in the real home
+        # The escape harness gives every test a fake HOME; without these,
+        # rootless Podman would create fresh storage inside each one.
+        run: |
+          echo "XDG_DATA_HOME=$HOME/.local/share" >> "$GITHUB_ENV"
+          echo "XDG_CONFIG_HOME=$HOME/.config" >> "$GITHUB_ENV"
+      - run: cargo build --workspace --locked
+      - name: Escape suite against the container backend
+        env:
+          AGENTKEEP_ESCAPE_BACKEND: container
+          AGENTKEEP_CONTAINER_RUNTIME: ${{ matrix.runtime }}
+          AGENTKEEP_REQUIRE_SANDBOX: "1"
+        run: tests/escape/run.sh
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-24.04

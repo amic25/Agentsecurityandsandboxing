@@ -76,7 +76,8 @@ fn can_create_namespaces() -> Result<(), String> {
     }
 }
 
-fn seccomp_available() -> bool {
+/// Does the kernel support seccomp filters?
+pub(crate) fn seccomp_available() -> bool {
     fs::read_to_string("/proc/self/status")
         .is_ok_and(|s| s.lines().any(|l| l.starts_with("Seccomp:")))
 }

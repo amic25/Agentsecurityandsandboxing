@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Container backend (`--backend container`, Linux hosts): Podman or Docker
+  driven through its CLI, never a daemon socket. The plan's mounts are bound
+  into an empty, locally imported image (never pulled) with a read-only
+  root, `--network none` and the loopback relay to the egress proxy, no
+  capabilities, `no-new-privileges`, the runtime's memory and pid cgroup
+  limits; agentkeep runs as PID 1 and adds rlimits, Landlock and the seccomp
+  deny-list on top of the runtime's profile. No environment value reaches
+  the runtime's command line. A lifeline socket makes init kill the
+  container when the supervisor goes away. `auto` still prefers the linux
+  backend. CI job `escape-container` runs the escape suite against it.
+- Escape test `f1_hidden_paths_under_a_visible_tree_stay_hidden`: hidden
+  paths stay empty when a policy makes their parent visible (it caught
+  Podman's tmpfs copy-up bringing hidden files back).
 - Phase 1: policy engine (`agentkeep-policy`) with layered merge,
   tightening-only semantics, `[override]` acknowledgement and a pure
   `decide()`; `agentkeep policy init|show|check`; `agentkeep doctor`.
