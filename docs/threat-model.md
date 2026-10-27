@@ -160,7 +160,7 @@ documented metric, not a promise.
 | S2 | A malicious preset or rule contributed to the community directories | T1 (via PR) | Code review, CODEOWNERS on `rules/` and `presets/`, corpus tests that must pass; presets cannot disable protections, only add domains and paths | planned (3, 5) |
 | S3 | Supply-chain compromise of a dependency | — | `cargo deny`, `cargo audit`, lockfile, small dependency set with written justifications, no build scripts that fetch | enforced (0) |
 | S4 | A tampered release binary | — | cosign keyless signatures, SLSA provenance, SBOM, reproducible builds, checksums printed by the installer | planned (6) |
-| S5 | agentkeep phones home | — | No telemetry. No network calls except an explicit opt-in update check. `cargo deny` bans known telemetry crates | enforced by policy (0); tested on Linux (`s5_supervisor_makes_no_outbound_connections`: under `strace -f`, every `connect()` of `agentkeep run -- true` is `AF_UNIX`) |
+| S5 | agentkeep phones home | — | No telemetry. No network calls except an explicit opt-in update check. `cargo deny` bans known telemetry crates | enforced by policy (0); tested on Linux and the container backend (`s5_supervisor_makes_no_outbound_connections`: under `strace -f`, every `connect()` of `agentkeep run -- true` is `AF_UNIX`; on the container backend only the supervisor and the runtime CLI are traced, because the runtime daemon starts the command) |
 
 ## 5. Backend capability matrix
 

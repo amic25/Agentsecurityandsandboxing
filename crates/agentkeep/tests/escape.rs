@@ -80,6 +80,42 @@ mod suite {
     }
 
     impl Harness {
+        /// Non-vacuity check for a `strace -f` of the supervisor. On
+        /// namespace backends the sandboxed command is a descendant of the
+        /// supervisor, so the trace must reach it (`in_sandbox`). The
+        /// container backend's command is started by the runtime daemon,
+        /// outside the supervisor's process tree; there the trace must at
+        /// least reach the runtime's `run`, and the in-container part is
+        /// reported as not traced.
+        pub fn assert_trace_reached(
+            &self,
+            id: &str,
+            trace: &str,
+            in_sandbox: impl Fn(&str) -> bool,
+        ) {
+            if self.backend == "container" {
+                let reached_runtime = trace.lines().any(|l| {
+                    l.contains("execve(")
+                        && (l.contains("docker") || l.contains("podman"))
+                        && l.contains("\"run\"")
+                });
+                assert!(
+                    reached_runtime,
+                    "{id}: strace did not reach the runtime's run:\n{trace}"
+                );
+                let msg = format!(
+                    "NOT APPLICABLE [{id} in-sandbox trace] on backend `container`: the command is started by the runtime daemon, not by the supervisor; only the supervisor and runtime CLI were traced"
+                );
+                println!("{msg}");
+                eprintln!("{msg}");
+            } else {
+                assert!(
+                    trace.lines().any(in_sandbox),
+                    "{id}: strace did not follow into the sandbox:\n{trace}"
+                );
+            }
+        }
+
         /// Does the backend under test claim this control?
         pub fn claims(&self, control: &str) -> bool {
             self.controls.iter().any(|c| c == control)
@@ -1284,7 +1320,7 @@ for req in [b"CONNECT {EXFIL_NAME}:443 HTTP/1.1\r\nHost: {EXFIL_NAME}:443\r\n\r\
         );
         let trace = h.root.path().join("n3.trace");
         let traced = tools("N3 strace", &["strace"]);
-        let wrapper = strace(&trace, "connect,sendto,sendmsg");
+        let wrapper = strace(&trace, "connect,sendto,sendmsg,execve");
         let wrapper: Vec<&str> = wrapper.iter().map(String::as_str).collect();
         let l = h.run_logged(
             traced.then_some(wrapper.as_slice()),
@@ -1307,10 +1343,7 @@ for req in [b"CONNECT {EXFIL_NAME}:443 HTTP/1.1\r\nHost: {EXFIL_NAME}:443\r\n\r\
         );
         if traced {
             let trace = fs::read_to_string(&trace).unwrap();
-            assert!(
-                trace.contains(RELAY_CONNECT),
-                "strace did not follow into the sandbox:\n{trace}"
-            );
+            h.assert_trace_reached("N3", &trace, |l| l.contains(RELAY_CONNECT));
             let bad = outbound_attempts(&trace, &[RELAY_CONNECT]);
             assert!(bad.is_empty(), "outbound attempts: {bad:#?}");
         }
@@ -1436,12 +1469,9 @@ s.close()
         assert!(o.status.success(), "{}", out(&o));
         let trace = fs::read_to_string(&trace).unwrap();
         // Non-vacuous: the trace followed the supervisor into the sandbox.
-        assert!(
-            trace
-                .lines()
-                .any(|l| l.contains("execve(") && l.contains("[\"true\"]")),
-            "strace did not reach the sandboxed command:\n{trace}"
-        );
+        h.assert_trace_reached("S5", &trace, |l| {
+            l.contains("execve(") && l.contains("[\"true\"]")
+        });
         let bad = outbound_attempts(&trace, &[]);
         assert!(bad.is_empty(), "the supervisor reached out: {bad:#?}");
     }
