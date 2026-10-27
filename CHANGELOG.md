@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ### Added
 
+- Phase 2 (experimental, UNVERIFIED until macOS CI passes): macOS backend
+  (`macos`): a Seatbelt profile generated per session and applied with
+  `sandbox-exec`; project and private `HOME`/`TMPDIR` read-write, system
+  paths read-only, hidden paths denied even under allowed parents; network
+  only through a supervisor-side loopback relay to the egress proxy; command
+  shims on macOS; own process group with `RLIMIT_CORE=0` and an approximate
+  per-user `RLIMIT_NPROC`. Escape suite made portable (absolute-path probes,
+  host loopback, DNS, proxy positive control, fork cap, service managers)
+  and required on the macOS CI runners. See `docs/limitations.md`.
 - Phase 1: policy engine (`agentkeep-policy`) with layered merge,
   tightening-only semantics, `[override]` acknowledgement and a pure
   `decide()`; `agentkeep policy init|show|check`; `agentkeep doctor`.

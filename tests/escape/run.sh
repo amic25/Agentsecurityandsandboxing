@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Run the escape suite with full output so every UNTESTED line is visible.
-# On Linux CI, AGENTKEEP_REQUIRE_SANDBOX=1 turns UNTESTED into a failure.
+# On Linux and macOS CI, AGENTKEEP_REQUIRE_SANDBOX=1 turns UNTESTED into a failure.
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 echo "escape suite: host $(uname -s) $(uname -m)"

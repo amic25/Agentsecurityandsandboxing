@@ -17,7 +17,7 @@ mod netwire;
 mod policy_cmd;
 #[cfg(unix)]
 mod run;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 mod shim;
 mod ui;
 
@@ -34,20 +34,22 @@ use crate::cli::{Cli, Command};
 const EXIT_NOT_IMPLEMENTED: u8 = 70;
 
 fn main() -> ExitCode {
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
         let raw: Vec<String> = std::env::args().collect();
 
-        // Started through a command shim inside a sandbox?
+        // Started through a command shim inside a sandbox? Shims are
+        // symlinks named after the command, on every Unix backend.
         if let Some(name) = raw
             .first()
-            .and_then(|a| agentkeep_sandbox::linux::invoked_as_shim(a))
+            .and_then(|a| agentkeep_sandbox::invoked_as_shim(a))
         {
             return shim::main(&name, &raw[1..]);
         }
 
-        // The sandbox init process. Parsed by hand: it must not depend on
-        // the full CLI, and its arguments are fds chosen by the supervisor.
+        // The Linux sandbox init process. Parsed by hand: it must not depend
+        // on the full CLI, and its arguments are fds chosen by the supervisor.
+        #[cfg(target_os = "linux")]
         if raw.get(1).map(String::as_str) == Some("__init") {
             let fd = |flag: &str| -> i32 {
                 raw.iter()

@@ -5,11 +5,12 @@
 //! [`Capabilities`]; the caller compares that with the policy and refuses to
 //! run (or runs with recorded degradations) when they disagree.
 //!
-//! Only the Linux backend exists so far. On other operating systems every
-//! backend probes as unavailable and `agentkeep run` says so.
+//! Backends: `linux` (namespaces, Landlock, seccomp) and `macos` (Seatbelt
+//! via `sandbox-exec`). The macOS profile generator is portable and tested
+//! on every platform; probing and launching it needs macOS.
 //!
-//! `unsafe` is confined to `linux::sys`; every block carries a `SAFETY`
-//! comment. Everything else in this crate forbids it.
+//! `unsafe` is confined to `linux::sys` and `macos::sys` (plus a few marked
+//! blocks in the Linux launcher); every block carries a `SAFETY` comment.
 
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
@@ -18,6 +19,7 @@ pub mod probe;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+pub mod macos;
 
 use std::fmt;
 use std::time::Duration;
@@ -152,9 +154,67 @@ pub fn backends() -> Vec<Box<dyn Backend>> {
     {
         vec![Box::new(linux::LinuxBackend)]
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        vec![Box::new(macos::MacosBackend)]
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         Vec::new()
+    }
+}
+
+/// True when `argv[0]` names something other than agentkeep itself, which
+/// means we were started through a command shim (a symlink to the agentkeep
+/// binary named after the command). Returns the command name.
+pub fn invoked_as_shim(argv0: &str) -> Option<String> {
+    let base = std::path::Path::new(argv0)
+        .file_name()?
+        .to_str()?
+        .to_string();
+    (base != "agentkeep" && !base.starts_with("agentkeep-")).then_some(base)
+}
+
+/// Install supervisor-side signal handling for the backend in use. Call
+/// after [`Backend::launch`]. Ctrl-C reaches the command through the
+/// terminal; SIGTERM and SIGHUP are forwarded by [`SandboxHandle::wait`].
+pub fn install_supervisor_signals() {
+    #[cfg(target_os = "linux")]
+    linux::install_supervisor_signals();
+    #[cfg(target_os = "macos")]
+    macos::install_supervisor_signals();
+}
+
+/// Ownership of the terminal for the duration of an approval prompt.
+///
+/// On Linux the sandbox shares the supervisor's process group and this does
+/// nothing. On macOS the sandbox leads its own process group and holds the
+/// terminal's foreground; this hands the foreground back to the supervisor
+/// so the prompt can be read, and returns it when dropped. A command that
+/// reads the terminal meanwhile is stopped by the kernel and continued
+/// afterwards, so it cannot swallow the answer.
+#[must_use = "the terminal is handed back when the guard is dropped"]
+pub struct PromptTerminal {
+    #[cfg(target_os = "macos")]
+    taken: bool,
+}
+
+impl PromptTerminal {
+    /// Take the terminal, where that is needed.
+    pub fn take() -> Self {
+        Self {
+            #[cfg(target_os = "macos")]
+            taken: macos::take_terminal(),
+        }
+    }
+}
+
+impl Drop for PromptTerminal {
+    fn drop(&mut self) {
+        #[cfg(target_os = "macos")]
+        if self.taken {
+            macos::give_terminal_back();
+        }
     }
 }
 
@@ -186,4 +246,33 @@ pub fn select(name: &str) -> Result<Selected, Rejected> {
         ));
     }
     Err(rejected)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn shim_detection() {
+        assert_eq!(
+            invoked_as_shim("/run/agentkeep/bin/git"),
+            Some("git".into())
+        );
+        assert_eq!(invoked_as_shim("git"), Some("git".into()));
+        assert_eq!(invoked_as_shim("/usr/local/bin/agentkeep"), None);
+        assert_eq!(invoked_as_shim("agentkeep-dev"), None);
+        assert_eq!(invoked_as_shim(""), None);
+    }
+
+    #[test]
+    fn backends_for_this_os() {
+        let names: Vec<&str> = backends().iter().map(|b| b.name()).collect();
+        if cfg!(target_os = "linux") {
+            assert_eq!(names, vec!["linux"]);
+        } else if cfg!(target_os = "macos") {
+            assert_eq!(names, vec!["macos"]);
+        } else {
+            assert!(names.is_empty());
+        }
+    }
 }
