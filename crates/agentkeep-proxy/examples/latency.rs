@@ -2,7 +2,8 @@
 //!
 //! Starts a local plain origin, a local TLS origin and the proxy in this
 //! process (the proxy on its own runtime, exactly as `agentkeep run` starts
-//! it, with every event written to a real hash-chained audit log), then
+//! it, with every event redacted and written to a real hash-chained audit
+//! log), then
 //! sends N sequential requests per scenario and reports the latency the
 //! proxy adds over talking to the origin directly.
 //!
@@ -48,9 +49,24 @@ mod bench {
         LOREM.iter().copied().cycle().take(n).collect()
     }
 
-    /// Allow everything; log every event to a real audit writer, as the CLI does.
+    /// Allow everything; redact every event and log it to a real audit
+    /// writer, as the CLI does.
     struct BenchHooks {
         log: Mutex<agentkeep_audit::Writer>,
+        redactor: agentkeep_proxy::dlp::Scanner,
+    }
+
+    fn redact(r: &agentkeep_proxy::dlp::Scanner, v: &mut serde_json::Value) {
+        match v {
+            serde_json::Value::String(s) => {
+                if let Some(clean) = r.redact(s) {
+                    *s = clean;
+                }
+            }
+            serde_json::Value::Array(items) => items.iter_mut().for_each(|i| redact(r, i)),
+            serde_json::Value::Object(map) => map.values_mut().for_each(|i| redact(r, i)),
+            _ => {}
+        }
     }
 
     impl Hooks for BenchHooks {
@@ -62,7 +78,8 @@ mod bench {
         fn ask(&self, _prompt: &str, _rule: &str) -> bool {
             false
         }
-        fn log(&self, kind: &str, data: serde_json::Value) {
+        fn log(&self, kind: &str, mut data: serde_json::Value) {
+            redact(&self.redactor, &mut data);
             if let Ok(mut w) = self.log.lock() {
                 let _ = w.append(kind, data);
             }
@@ -377,10 +394,13 @@ mod bench {
         let (tls_port, origin_pem) = start_tls_origin(dir.path());
 
         let writer = agentkeep_audit::Writer::create(&dir.path().join("audit")).unwrap();
+        let dlp = Config::default().dlp;
         let hooks = Arc::new(BenchHooks {
             log: Mutex::new(writer),
+            redactor: agentkeep_proxy::dlp::Scanner::new(&dlp),
         });
         let config = Config {
+            dlp,
             allow_private: true,
             trusted_cas: vec![origin_pem.clone()],
             passthrough: vec![format!("127.0.0.1:{tls_port}")],

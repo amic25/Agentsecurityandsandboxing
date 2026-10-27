@@ -77,10 +77,24 @@ A third run on the committed code (load average ~2.4) gave added p50 of
 0.14, 0.99 and 0.30 ms at 1 KiB and 2.68, 4.67 and 1.01 ms at 1 MiB, in
 table order.
 
+Re-run 2026-10-27 after the Phase 2 hardening (metadata block, SNI and
+`Host` checks), with the benchmark now also redacting every event before
+logging it, as `agentkeep run` does. Same host, load average ~0.7 to 1.0,
+500/100 samples, two runs, added p50 in table order:
+
+| Run | 1 KiB plain | 1 KiB inspected | 1 KiB passthrough | 1 MiB plain | 1 MiB inspected | 1 MiB passthrough |
+|---|---|---|---|---|---|---|
+| 1 | 0.18 | 1.12 | 0.40 | 2.99 | 5.67 | 0.92 |
+| 2 | 0.20 | 1.34 | 0.43 | 3.05 | 6.32 | 1.07 |
+
 Reading: every 1 KiB path and the plain tunnel at both sizes are well
-inside the 5 ms p50 budget. Inspection of a 1 MiB body costs about 5 ms at
-p50 (on the budget line on this host): the body is decrypted, scanned in
-chunks with the carry-over window, and re-encrypted. Most of the 1 KiB
+inside the 5 ms p50 budget. Inspection of a 1 MiB body costs 5 to 6.5 ms at
+p50 on this host, above the 5 ms line that applies to 1 KiB bodies: the
+body is decrypted, scanned in chunks with the carry-over window, and
+re-encrypted. The 10-27 runs are about 1 ms slower on that row than the
+10-26 runs. Direct 1 MiB HTTPS times were up to 1 ms higher too in one of
+the two runs, so host variance may explain part of it; nothing in the
+hardening runs per byte. Not investigated further yet. Most of the 1 KiB
 inspected cost is the second TLS handshake, because the proxy opens a new
 origin connection for every request (no pool; see `limitations.md`). p95
 on the passthrough 1 MiB row varies between runs on this shared host.
