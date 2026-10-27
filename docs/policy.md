@@ -124,7 +124,7 @@ command rules as a guard rail, not a boundary.
 | Key | Default | Meaning |
 |---|---|---|
 | `dir` | `~/.local/share/agentkeep/sessions` | One subdirectory per session with `events.jsonl` |
-| `redact` | `true` | Redact values that look like secrets before logging (Phase 2) |
+| `redact` | `true` | Replace anything the DLP detectors recognise (credential formats, `dlp.block_values`, `env.pass` secrets) in every logged string with `[REDACTED:<detector>]`. `dlp.block_values` are never logged either way |
 
 ## `[override]`
 

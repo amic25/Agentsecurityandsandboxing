@@ -153,7 +153,7 @@ documented metric, not a promise.
 |---|---|---|---|---|
 | L-A1 | The agent edits or truncates its own log | T1–T4 | Not mounted into the sandbox; opened append-only by the supervisor; session directory `0700`, log `0600` so other local users cannot read it | enforced (`f10_*`, `l1_*`, unit test `log_is_owner_only`) |
 | L-A2 | Log tampering after the fact by someone with host access | out of scope, but: | Hash chain per event; `agentkeep log verify` detects edits and truncation (not a replacement of the whole file by someone who recomputes the chain) | chain written and verified in tests (`l1_*`); `log verify` CLI planned (5) |
-| L-A3 | Secrets written to the log | — | Redaction via the DLP detectors; `audit.redact = true` by default | partial: proxy events carry only redacted samples, tested (`assert_log_free_of` in the `n2_*`, `e3_*`, `n7_*` escape tests); `audit.redact` is not implemented and the sandboxed command line is logged verbatim (`limitations.md`) |
+| L-A3 | Secrets written to the log | — | Redaction via the DLP detectors; `audit.redact = true` by default | enforced for recognisable secrets (`l3_secrets_on_command_lines_and_block_values_never_reach_the_log`, and `assert_log_free_of` in the `n2_*`, `e3_*`, `n7_*` tests): every string in every event passes through the DLP detectors, `dlp.block_values` are never logged; secrets in unknown formats are logged as written (`limitations.md`) |
 
 ### 4.8 agentkeep itself
 

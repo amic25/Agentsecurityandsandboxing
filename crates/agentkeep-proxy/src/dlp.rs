@@ -303,6 +303,49 @@ impl Scanner {
     }
 }
 
+impl Scanner {
+    /// Replace everything that looks like a secret in `text` with
+    /// `[REDACTED:<detector>]`: every built-in detector (blocking and
+    /// reporting), every `dlp.block_values` literal and every bound secret.
+    /// Returns `None` when nothing matched. Used for the audit log, never for
+    /// traffic.
+    pub fn redact(&self, text: &str) -> Option<String> {
+        let data = text.as_bytes();
+        let mut spans: Vec<(usize, usize, String)> = Vec::new();
+        if let Some(ac) = &self.literals {
+            for m in ac.find_overlapping_iter(data) {
+                let id = match &self.literal_kinds[m.pattern().as_usize()] {
+                    LiteralKind::Blocked => "block_value".to_string(),
+                    LiteralKind::Bound { name, .. } => name.clone(),
+                };
+                spans.push((m.start(), m.end(), id));
+            }
+        }
+        for idx in self.set.matches(data) {
+            for m in self.regexes[idx].find_iter(data) {
+                spans.push((m.start(), m.end(), self.ids[idx].to_string()));
+            }
+        }
+        if spans.is_empty() {
+            return None;
+        }
+        spans.sort_by_key(|(s, e, _)| (*s, std::cmp::Reverse(*e)));
+        let mut out = Vec::with_capacity(data.len());
+        let mut pos = 0;
+        for (start, end, id) in spans {
+            if end <= pos {
+                continue; // inside a span already redacted
+            }
+            let start = start.max(pos);
+            out.extend_from_slice(&data[pos..start]);
+            out.extend_from_slice(format!("[REDACTED:{id}]").as_bytes());
+            pos = end;
+        }
+        out.extend_from_slice(&data[pos..]);
+        Some(String::from_utf8_lossy(&out).into_owned())
+    }
+}
+
 /// First four characters of a match, then `…`. Enough to recognise a key in a
 /// log without reproducing it.
 fn sample(bytes: &[u8]) -> String {
@@ -507,6 +550,35 @@ mod tests {
             )
             .unwrap();
         assert_eq!(f.detector, "block_value");
+    }
+
+    #[test]
+    fn redacts_every_kind_of_secret_for_logs() {
+        let s = Scanner::new(&DlpConfig {
+            enabled: true,
+            block_values: vec!["hunter2-hunter2".into()],
+            bound_secrets: vec![BoundSecret {
+                name: "ANTHROPIC_API_KEY".into(),
+                value: "sk-test-fake-bound-value".into(),
+                domains: vec![],
+            }],
+            ..Default::default()
+        });
+        let text = "curl -H 'Authorization: token ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghij0' --data hunter2-hunter2 -H key:sk-test-fake-bound-value AKIAIOSFODNN7EXAMPLE";
+        let r = s.redact(text).unwrap();
+        for leaked in [
+            "ghp_ABCDEF",
+            "hunter2",
+            "sk-test-fake-bound",
+            "AKIAIOSFODNN7",
+        ] {
+            assert!(!r.contains(leaked), "{r}");
+        }
+        assert!(r.contains("[REDACTED:github_token]"), "{r}");
+        assert!(r.contains("[REDACTED:block_value]"), "{r}");
+        assert!(r.contains("[REDACTED:ANTHROPIC_API_KEY]"), "{r}");
+        assert!(r.starts_with("curl -H 'Authorization: token "), "{r}");
+        assert!(s.redact("git status --short").is_none());
     }
 
     #[test]

@@ -85,9 +85,12 @@ four exit with status 70.
   `[override]` acknowledgement or a warning. Review a cloned repository's
   policy file before running in it. Found while writing the network escape
   tests, which use exactly this to configure their local origins.
-- The audit log records the sandboxed command line verbatim in
-  `session.start`, so a secret passed as an argument is written to it.
-  `audit.redact` is parsed but not implemented (L-A3).
+- Audit-log redaction (`audit.redact`, on by default) replaces what the
+  DLP detectors recognise: known credential formats, `dlp.block_values`
+  and secrets passed with `env.pass`. A secret in a format no detector
+  knows (a random password, a private token scheme) is logged as written,
+  for example on a command line. `dlp.block_values` themselves are never
+  logged, only their count. With `audit.redact = false` nothing is redacted.
 - Every proxied request opens a new connection, and for HTTPS a new TLS
   handshake, to the origin; there is no connection pool. This is most of
   the added latency in `docs/benchmarks.md`.

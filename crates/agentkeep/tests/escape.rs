@@ -1742,6 +1742,35 @@ s.sendall(b"{\"kind\":\"approver\"}\n"); print("reply", s.recv(200).decode().str
         );
     }
 
+    #[test]
+    fn l3_secrets_on_command_lines_and_block_values_never_reach_the_log() {
+        let Some(h) = harness("L-A3") else { return };
+        let token = "ghp_FAKEFAKEFAKEFAKEFAKEFAKEFAKEFAKEFAK1";
+        let block = "FAKE-BLOCK-VALUE-agentkeep-l3";
+        let policy = format!("[dlp]\nblock_values = [\"{block}\"]\n");
+        let script = format!(
+            "echo {token} >/dev/null; echo {block} >/dev/null; git push https://x:{token}@example.invalid/r main; echo done"
+        );
+        let l = h.run_logged(None, &policy, &["sh", "-c", &script], &[]);
+        assert!(l.text().contains("done"), "{}", l.text());
+        l.assert_log_free_of(&[token, block, "FAKEFAKEFAKE"]);
+        assert!(l.raw.contains("[REDACTED:github_token]"), "{}", l.raw);
+        assert!(
+            l.raw.contains("not logged"),
+            "block_values must be summarised:\n{}",
+            l.raw
+        );
+        // The shimmed push was still recorded, just without the credential.
+        let execs = l.of("exec");
+        assert!(
+            execs
+                .iter()
+                .any(|e| e["argv"][0] == "git" && e["decision"] == "deny"),
+            "{}",
+            l.raw
+        );
+    }
+
     // ---- positive controls --------------------------------------------
 
     #[test]

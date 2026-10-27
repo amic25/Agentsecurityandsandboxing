@@ -63,18 +63,52 @@ pub struct AnswerMessage {
     pub answer: String,
 }
 
-/// Something the server logs.
-pub struct LogSink(pub Arc<Mutex<Option<agentkeep_audit::Writer>>>);
+/// The session's audit log. Every event written anywhere in a session goes
+/// through here, so redaction cannot be forgotten at a call site (L-A3).
+#[derive(Clone)]
+pub struct LogSink {
+    writer: Arc<Mutex<Option<agentkeep_audit::Writer>>>,
+    redactor: Option<Arc<agentkeep_proxy::dlp::Scanner>>,
+}
 
 impl LogSink {
-    fn log(&self, kind: &str, data: serde_json::Value) {
-        if let Ok(mut g) = self.0.lock() {
+    /// `redactor` is `None` only when the policy sets `audit.redact = false`.
+    pub fn new(
+        writer: agentkeep_audit::Writer,
+        redactor: Option<Arc<agentkeep_proxy::dlp::Scanner>>,
+    ) -> Self {
+        Self {
+            writer: Arc::new(Mutex::new(Some(writer))),
+            redactor,
+        }
+    }
+
+    /// Append one event, with every string value redacted.
+    pub fn log(&self, kind: &str, mut data: serde_json::Value) {
+        if let Some(r) = &self.redactor {
+            redact_json(r, &mut data);
+        }
+        if let Ok(mut g) = self.writer.lock() {
             if let Some(w) = g.as_mut() {
                 if let Err(e) = w.append(kind, data) {
                     ui::warn(&format!("audit log write failed: {e}"));
                 }
             }
         }
+    }
+}
+
+/// Redact every string inside a JSON value, recursively.
+fn redact_json(r: &agentkeep_proxy::dlp::Scanner, v: &mut serde_json::Value) {
+    match v {
+        serde_json::Value::String(s) => {
+            if let Some(clean) = r.redact(s) {
+                *s = clean;
+            }
+        }
+        serde_json::Value::Array(items) => items.iter_mut().for_each(|i| redact_json(r, i)),
+        serde_json::Value::Object(map) => map.values_mut().for_each(|i| redact_json(r, i)),
+        _ => {}
     }
 }
 

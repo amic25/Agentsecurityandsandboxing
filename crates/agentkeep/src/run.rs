@@ -4,7 +4,7 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use agentkeep_common::secrets::looks_like_secret_name;
 use agentkeep_policy::decide::{Decision, Request};
@@ -79,7 +79,12 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
     let session_dir = loaded.policy.audit_dir.join(&session_id);
     let writer = agentkeep_audit::Writer::create(&session_dir)
         .with_context(|| format!("create audit log in {}", session_dir.display()))?;
-    let log = Arc::new(Mutex::new(Some(writer)));
+    let redactor = loaded.policy.audit_redact.then(|| {
+        Arc::new(agentkeep_proxy::dlp::Scanner::new(&netwire::dlp_config(
+            &loaded,
+        )))
+    });
+    let log = LogSink::new(writer, redactor);
 
     // Approval channel must exist before launch (it is bind-mounted in).
     let mut server = Server::bind(
@@ -89,7 +94,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
         loaded.policy.approval_transports.clone(),
         loaded.policy.approval_timeout,
         globals.no_ask,
-        LogSink(Arc::clone(&log)),
+        log.clone(),
     )?;
 
     // The egress proxy: CA, bundle and socket now; runtime after launch.
@@ -122,9 +127,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
         );
     }
 
-    append(
-        &log,
-        "session.start",
+    log.log("session.start",
         serde_json::json!({
             "session": session_id,
             "command": plan.command,
@@ -135,7 +138,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
             "degradations": probe.degradations(),
             "policy_sources": loaded.sources,
             "policy_warnings": loaded.warnings.iter().map(|w| format!("{}: {}", w.source, w.message)).collect::<Vec<_>>(),
-            "policy": toml::to_string(&loaded.merged).unwrap_or_default(),
+            "policy": policy_for_log(&loaded.merged),
             "env_scrubbed": scrubbed.plain,
             "env_scrubbed_secrets": scrubbed.secret_like,
             "mounts": plan.mounts,
@@ -160,11 +163,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
     let mut handle = match backend.launch(&plan) {
         Ok(h) => h,
         Err(e) => {
-            append(
-                &log,
-                "session.end",
-                serde_json::json!({"error": e.to_string()}),
-            );
+            log.log("session.end", serde_json::json!({"error": e.to_string()}));
             return Err(e).context("launch sandbox");
         }
     };
@@ -176,8 +175,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
 
     let status = handle.wait().context("wait for sandbox")?;
     let code = status.shell_code();
-    append(
-        &log,
+    log.log(
         "session.end",
         serde_json::json!({"status": status.to_string(), "code": code}),
     );
@@ -190,14 +188,17 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
     ))
 }
 
-fn append(log: &Arc<Mutex<Option<agentkeep_audit::Writer>>>, kind: &str, data: serde_json::Value) {
-    if let Ok(mut g) = log.lock() {
-        if let Some(w) = g.as_mut() {
-            if let Err(e) = w.append(kind, data) {
-                ui::warn(&format!("audit log write failed: {e}"));
-            }
+/// The merged policy as written to the audit log. `dlp.block_values` are
+/// literal secrets the user wants kept in; only their number is recorded.
+fn policy_for_log(merged: &agentkeep_policy::PolicyFile) -> String {
+    let mut p = merged.clone();
+    if let Some(dlp) = p.dlp.as_mut() {
+        let n = dlp.block_values.len();
+        if n > 0 {
+            dlp.block_values = vec![format!("<{n} value(s), not logged>")];
         }
     }
+    toml::to_string(&p).unwrap_or_default()
 }
 
 /// Names dropped from the environment, split by whether they looked secret.

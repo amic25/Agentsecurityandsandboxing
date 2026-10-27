@@ -141,6 +141,18 @@ pub fn system_ca_bundle() -> Option<PathBuf> {
     .find(|p| p.is_file())
 }
 
+/// The DLP configuration for this session, shared by the proxy (which
+/// blocks) and the audit log (which redacts).
+pub fn dlp_config(loaded: &Loaded) -> DlpConfig {
+    let policy = &loaded.policy;
+    DlpConfig {
+        enabled: policy.dlp_enabled,
+        block_values: policy.dlp_block_values.clone(),
+        bound_secrets: bound_secrets(loaded),
+        report_only: policy.dlp_report_only.clone(),
+    }
+}
+
 /// Create the CA, write the bundle, bind the socket. No threads yet.
 pub fn prepare(loaded: &Loaded, scratch: &Path, approval: Arc<Shared>) -> Result<Wiring> {
     let policy = &loaded.policy;
@@ -149,12 +161,7 @@ pub fn prepare(loaded: &Loaded, scratch: &Path, approval: Arc<Shared>) -> Result
         passthrough: policy.passthrough.clone(),
         allow_private: policy.allow_private,
         trusted_cas: policy.trusted_cas.clone(),
-        dlp: DlpConfig {
-            enabled: policy.dlp_enabled,
-            block_values: policy.dlp_block_values.clone(),
-            bound_secrets: bound_secrets(loaded),
-            report_only: policy.dlp_report_only.clone(),
-        },
+        dlp: dlp_config(loaded),
         ..Config::default()
     };
     let hooks = Arc::new(PolicyHooks {
