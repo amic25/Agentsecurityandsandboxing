@@ -931,12 +931,20 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
 
     /// Lines of an strace log that reach for anything but a Unix socket or
     /// one of the `allowed` loopback endpoints, or consult a name service.
-    fn outbound_attempts(trace: &str, allowed: &[&str]) -> Vec<String> {
+    ///
+    /// With `absent_resolver_ok`, a name-service socket that does not exist
+    /// does not count: the container backend's trace includes the runtime
+    /// CLI, and rootless Podman (linked against glibc) looks up the user
+    /// database through NSS, which tries nscd first. Such a connect reaches
+    /// nothing, and a lookup that then falls back to DNS is still caught as
+    /// an inet attempt.
+    fn outbound_attempts(trace: &str, allowed: &[&str], absent_resolver_ok: bool) -> Vec<String> {
         trace
             .lines()
             .filter(|l| {
                 if l.contains("io.systemd.Resolve") || l.contains("nscd/socket") {
-                    return true;
+                    return !(absent_resolver_ok
+                        && l.ends_with("= -1 ENOENT (No such file or directory)"));
                 }
                 let inet = l.contains("sa_family=AF_INET") || l.contains("sa_family=AF_UNSPEC");
                 if l.contains("connect(") {
@@ -1407,7 +1415,7 @@ for req in [b"CONNECT {EXFIL_NAME}:443 HTTP/1.1\r\nHost: {EXFIL_NAME}:443\r\n\r\
         if traced {
             let trace = fs::read_to_string(&trace).unwrap();
             h.assert_trace_reached("N3", &trace, |l| l.contains(RELAY_CONNECT));
-            let bad = outbound_attempts(&trace, &[RELAY_CONNECT]);
+            let bad = outbound_attempts(&trace, &[RELAY_CONNECT], h.backend == "container");
             assert!(bad.is_empty(), "outbound attempts: {bad:#?}");
         }
     }
@@ -1535,7 +1543,7 @@ s.close()
         h.assert_trace_reached("S5", &trace, |l| {
             l.contains("execve(") && l.contains("[\"true\"]")
         });
-        let bad = outbound_attempts(&trace, &[]);
+        let bad = outbound_attempts(&trace, &[], h.backend == "container");
         assert!(bad.is_empty(), "the supervisor reached out: {bad:#?}");
     }
 
