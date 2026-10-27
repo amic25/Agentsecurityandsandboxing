@@ -585,7 +585,7 @@ pub fn build(
     Ok(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))] // fixtures use POSIX paths
 mod tests {
     use std::collections::BTreeMap;
 

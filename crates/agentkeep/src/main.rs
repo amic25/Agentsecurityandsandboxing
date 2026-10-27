@@ -68,6 +68,7 @@ fn main() -> ExitCode {
         // PID 1 inside a container started by the container backend. Its
         // plan and supervisor channel are at fixed paths it was given by
         // bind mounts, not on the command line.
+        #[cfg(target_os = "linux")]
         if raw.get(1).map(String::as_str) == Some("__container-init") {
             agentkeep_sandbox::container::init::main(&raw[1..]);
         }
