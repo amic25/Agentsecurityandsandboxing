@@ -5,16 +5,17 @@ can see everything it did.**
 
 agentkeep is a drop-in security layer for AI coding and personal agents
 (Claude Code, Codex CLI, OpenCode, Gemini CLI, Cline, Goose and others). One
-static binary, one policy file, the same rules on every agent and every OS.
+binary, one policy file, the same rules on every agent and every OS.
 
-> **Status: pre-alpha, Phase 1.** `agentkeep run` sandboxes a command on
-> Linux (namespaces, Landlock, seccomp) with an escape suite behind it, and
-> the policy engine, approval prompts and audit log work. **There is no
-> network inside the sandbox yet**: the egress proxy that lets allowed
-> domains through is Phase 2, so an agent cannot reach its model API from
-> inside `agentkeep run` today. macOS and container backends, the scanner,
-> the MCP gateway and the log viewer are not implemented. Follow `PLAN.md`
-> for what lands when, and `CHANGELOG.md` for what has landed.
+> **Status: pre-alpha, Phase 2.** `agentkeep run` sandboxes a command on
+> Linux, with namespaces, Landlock and seccomp, or in a Podman/Docker
+> container (`--backend container`). Network traffic goes through an egress
+> proxy with a domain allowlist, TLS inspection and outbound secret
+> detection. The policy engine, approval prompts and the redacted, hash-chained
+> audit log work, and 38 escape tests run against both backends in CI. Not
+> implemented yet: the macOS and Windows backends, agent presets, the
+> scanner, the MCP gateway, and the log viewer and reports. Check `PLAN.md`
+> for when each lands and `CHANGELOG.md` for what has landed.
 
 <!-- demo GIF lands in Phase 6: an injected README tries to steal ~/.ssh and agentkeep blocks it -->
 
@@ -50,9 +51,14 @@ cd your-project
 ./target/release/agentkeep policy init --defaults # commented agentkeep.toml
 ./target/release/agentkeep run -- sh              # a shell that sees only the project
 cat ~/.ssh/id_ed25519                             # inside: No such file or directory
+curl -sI https://example.com                      # inside: 403 from the proxy, not allowed
+exit
+./target/release/agentkeep run --allow-domain example.com -- curl -sI https://example.com
 ```
 
 Every session writes `~/.local/share/agentkeep/sessions/<id>/events.jsonl`.
+A project's own `agentkeep.toml` can only tighten the policy until you run
+`agentkeep policy trust`, because it comes with the repository.
 
 ## Install
 
