@@ -73,6 +73,11 @@ jobs:
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
           sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+      - name: Tools the network escape tests drive (S5 runs under strace)
+        if: runner.os == 'Linux'
+        run: |
+          for t in curl python3 strace; do command -v "$t" >/dev/null || missing="$missing $t"; done
+          if [ -n "${missing:-}" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq $missing; fi
       - run: cargo build --workspace --locked
       - name: Unit, property and escape tests
         shell: bash

@@ -44,7 +44,8 @@ code we ask users to trust. Rules:
 |---|---|
 | `proptest` | Property tests for the policy engine and unit parsers |
 | `tempfile` | Fixture directories for discovery, audit and escape tests |
-| `libfuzzer-sys` (in `fuzz/`, separate workspace) | cargo-fuzz targets |
+| `libfuzzer-sys` (in `fuzz/`, separate workspace) | cargo-fuzz targets (`policy_parse`, `proxy_inputs`) |
+| `rcgen`, `rustls`, `rustls-pki-types` (dev of `agentkeep`) | The network escape tests run local TLS origins with throwaway self-signed certificates; the same versions are already runtime dependencies of `agentkeep-proxy`, so no new code enters the build. Alternative considered: shelling out to `openssl s_server`, which is not on every CI host and is harder to make record what it receives |
 
 ## Planned (will be justified when added)
 

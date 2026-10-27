@@ -5,12 +5,13 @@ missing, partial or backend-specific, it is listed here. Please keep it
 current: a limitation that is fixed is removed with the PR that fixes it, and
 a new gap is added with the PR that discovers it.
 
-Status: **Phase 1**. `agentkeep run` works on Linux with the namespaces
-backend and, on Linux hosts, the container backend (Podman or Docker);
-`policy init|show|check`, `doctor` and `approve` work everywhere
-the binary builds. The proxy (`network` rules), `scan`, `mcp-gateway`, `log`
-and `report` are not implemented yet and exit with status 70. There is no
-network inside the sandbox at all until Phase 2 adds the proxy.
+Status: **Phase 2 in progress**. `agentkeep run` works on Linux with the
+namespaces backend and, on Linux hosts, with the container backend (Podman
+or Docker). All sandbox traffic goes through the egress proxy, so
+`[network]` and `[dlp]` rules are enforced. `policy init|show|check`,
+`doctor` and `approve` work everywhere the binary builds. The macOS backend,
+`scan`, `mcp-gateway`, `log` and `report` are not implemented yet; the last
+four exit with status 70.
 
 ## General
 
@@ -25,13 +26,10 @@ network inside the sandbox at all until Phase 2 adds the proxy.
   boundary. Linux may gain enforced command rules through seccomp user
   notification in Phase 1.
 - No disk quota. An agent can fill the disk inside the project directory.
-- **Phase 1: no network at all.** The sandbox has only a loopback interface
-  and no DNS. The egress proxy that lets allowed domains through lands in
-  Phase 2. Until then an agent cannot reach its model API from inside
-  `agentkeep run`.
-- Tools that ignore `HTTP_PROXY`/`HTTPS_PROXY` have no network inside the
+- The sandbox has only a loopback interface and no DNS. The only way out is
+  the egress proxy, reached through `127.0.0.1:3128` inside the sandbox.
+  Tools that ignore `HTTP_PROXY`/`HTTPS_PROXY` have no network inside the
   sandbox. This is fail-closed by design. Presets list known offenders.
-- `[network]` rules are parsed and validated but not enforced until Phase 2.
 - Agent presets (`--preset`) land in Phase 5; `run` refuses the flag until
   then.
 - The approval prompt reads from `/dev/tty`, the same terminal the agent's
@@ -42,6 +40,56 @@ network inside the sandbox at all until Phase 2 adds the proxy.
   Phase 5 item.
 - TLS inspection breaks clients that pin certificates. Those hosts go in
   `network.passthrough`, where they get allowlist control but no DLP.
+
+## Egress proxy and DLP
+
+- DLP is pattern matching on plaintext. A secret that is encoded (base64,
+  hex, compression, including a `Content-Encoding: gzip` request body),
+  split across requests, or in a format no detector knows leaves through an
+  allowed host. It stops accidental and naive exfiltration, not a sender
+  who is trying to evade it (threat N2).
+- Bodies are streamed, not buffered: the request line and headers are
+  checked before anything is sent, but body bytes are forwarded as they are
+  scanned. When a secret in a body is blocked, the origin has already
+  received the headers and every earlier chunk, and if the secret straddles
+  two chunks, the part in the earlier chunk. The streaming scan never
+  misses a whole secret that a one-buffer scan would block (property test
+  in `dlp.rs`, fuzz target `proxy_inputs`).
+- A `CONNECT` tunnel is classified by its first bytes: TLS is terminated and
+  scanned, plaintext HTTP is scanned, anything else (SSH, database
+  protocols, protocols where the server speaks first) is refused unless the
+  host is in `network.passthrough`.
+- `network.passthrough` hosts, every tunnel when `network.tls_inspect =
+  false`, and WebSocket frames after the upgrade handshake are not scanned;
+  the audit log marks them `inspected: false` (N7). The escape suite pins
+  this so a change is deliberate.
+- Inspection needs SNI: HTTPS to an IP literal through an inspected tunnel
+  fails the handshake. Use a name or `passthrough`.
+- The `CONNECT` host decides the destination; the inner `Host` header and
+  SNI are not cross-checked against it. Domain fronting through an allowed
+  CDN reaches whatever that CDN routes the `Host` header to.
+- `network.allow_private = true` opens every private, loopback and
+  link-local range to allowed names, including cloud metadata at
+  `169.254.169.254` if it is allowed. There is no separate metadata block.
+- A secret passed with `env.pass` is bound to its provider's API host only
+  for well-known names (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN`,
+  ...). Any other name without a `dlp.allow_provider_keys_to` entry may be
+  sent to any allowed host.
+- The project's `agentkeep.toml` (untrusted when the repository is, threat
+  S1) can set `network.tls_inspect = false`, `network.allow_private = true`,
+  `network.trusted_cas`, `dlp.enabled = false`, `dlp.report_only` and
+  `env.pass` (which passes a host variable into the sandbox) without an
+  `[override]` acknowledgement or a warning. Review a cloned repository's
+  policy file before running in it. Found while writing the network escape
+  tests, which use exactly this to configure their local origins.
+- The audit log records the sandboxed command line verbatim in
+  `session.start`, so a secret passed as an argument is written to it.
+  `audit.redact` is parsed but not implemented (L-A3).
+- Every proxied request opens a new connection, and for HTTPS a new TLS
+  handshake, to the origin; there is no connection pool. This is most of
+  the added latency in `docs/benchmarks.md`.
+- A tunnel whose client sends nothing for 10 seconds is closed and logged
+  as denied.
 
 ## Linux backend
 

@@ -34,6 +34,11 @@ tempfile = { workspace = true }
 toml = { workspace = true }
 
 [dev-dependencies]
+# Local TLS origins for the network escape tests; both are already in the
+# build through agentkeep-proxy.
+rcgen = { workspace = true }
+rustls = { workspace = true }
+rustls-pki-types = { workspace = true }
 tempfile = { workspace = true }
 
 [lints]

@@ -31,6 +31,8 @@ tokio-rustls = { workspace = true }
 webpki-roots = { workspace = true }
 
 [dev-dependencies]
+# The latency benchmark logs through a real audit writer, as the CLI does.
+agentkeep-audit = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 

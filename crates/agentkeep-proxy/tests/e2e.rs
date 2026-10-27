@@ -243,6 +243,21 @@ fn plain_http_is_forwarded_and_logged() {
 }
 
 #[test]
+fn log_does_not_claim_inspection_when_dlp_is_off() {
+    // Regression: `inspected` used to be derived from the transport, so a
+    // session with `dlp.enabled = false` logged every request as scanned.
+    let origin = start_plain_origin();
+    let cfg = Config {
+        dlp: DlpConfig::default(),
+        ..Config::default()
+    };
+    let p = start_proxy(cfg, &["127.0.0.1"], None);
+    let out = raw(&p.socket, &format!("GET http://127.0.0.1:{}/k?AKIAIOSFODNN7EXAMPLE HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n", origin.port()));
+    assert!(out.contains("HTTP/1.1 200"), "DLP is off: {out}");
+    assert_eq!(p.hooks.find("net.request").unwrap()["inspected"], false);
+}
+
+#[test]
 fn denied_host_gets_403_without_connecting() {
     let origin = start_plain_origin();
     let p = start_proxy(Config::default(), &["allowed.example"], None);
@@ -338,10 +353,7 @@ fn bound_secret_is_blocked_when_misrouted() {
 fn connect_is_inspected_and_forwarded_over_tls() {
     let dir = tempfile::tempdir().unwrap();
     let (origin, origin_pem) = start_tls_origin(dir.path());
-    let cfg = Config {
-        inspect_ports: vec![origin.port()],
-        ..Config::default()
-    };
+    let cfg = Config::default();
     let p = start_proxy(cfg, &["localhost"], Some(origin_pem));
     let ca_pem = p.state.ca_pem().to_string();
     let out = connect_tls(
@@ -362,10 +374,7 @@ fn connect_is_inspected_and_forwarded_over_tls() {
 fn connect_inspection_blocks_secrets_inside_tls() {
     let dir = tempfile::tempdir().unwrap();
     let (origin, origin_pem) = start_tls_origin(dir.path());
-    let cfg = Config {
-        inspect_ports: vec![origin.port()],
-        ..Config::default()
-    };
+    let cfg = Config::default();
     let p = start_proxy(cfg, &["localhost"], Some(origin_pem));
     let ca_pem = p.state.ca_pem().to_string();
     let body = "-----BEGIN OPENSSH PRIVATE KEY-----\nFAKE\n-----END OPENSSH PRIVATE KEY-----";
@@ -380,7 +389,6 @@ fn passthrough_hosts_are_tunnelled_unscanned() {
     let (origin, origin_pem) = start_tls_origin(dir.path());
     let origin_pem_text = std::fs::read_to_string(&origin_pem).unwrap();
     let cfg = Config {
-        inspect_ports: vec![origin.port()],
         passthrough: vec!["localhost".into()],
         ..Config::default()
     };
@@ -441,4 +449,158 @@ fn private_addresses_are_refused_unless_allowed() {
     assert!(out.starts_with("HTTP/1.1 502"), "{out}");
     assert!(out.contains("non-public"), "{out}");
     let _ = TcpStream::connect(origin); // keep the origin thread alive until here
+}
+
+/// A plain origin that records every byte it is sent.
+fn start_recording_origin() -> (SocketAddr, Arc<Mutex<Vec<u8>>>) {
+    let l = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = l.local_addr().unwrap();
+    let seen = Arc::new(Mutex::new(Vec::new()));
+    let record = Arc::clone(&seen);
+    thread::spawn(move || {
+        for s in l.incoming().flatten() {
+            let seen = Arc::clone(&record);
+            thread::spawn(move || serve_echo(Recorder { inner: s, seen }));
+        }
+    });
+    (addr, seen)
+}
+
+struct Recorder {
+    inner: TcpStream,
+    seen: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Read for Recorder {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.seen.lock().unwrap().extend_from_slice(&buf[..n]);
+        Ok(n)
+    }
+}
+
+impl Write for Recorder {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.inner.write(buf)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// CONNECT, then send `payload` raw inside the tunnel and read to the end.
+/// Returns the proxy's CONNECT response head and whatever followed.
+fn connect_raw(socket: &PathBuf, host: &str, port: u16, payload: &[u8]) -> (String, String) {
+    let mut s = UnixStream::connect(socket).unwrap();
+    s.set_read_timeout(Some(std::time::Duration::from_secs(20)))
+        .unwrap();
+    write!(
+        s,
+        "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n\r\n"
+    )
+    .unwrap();
+    let mut head = Vec::new();
+    let mut b = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        if s.read_exact(&mut b).is_err() {
+            break;
+        }
+        head.push(b[0]);
+    }
+    let _ = s.write_all(payload);
+    let mut out = Vec::new();
+    let _ = s.read_to_end(&mut out);
+    (
+        String::from_utf8_lossy(&head).to_string(),
+        String::from_utf8_lossy(&out).to_string(),
+    )
+}
+
+#[test]
+fn plaintext_http_inside_connect_is_scanned_on_any_port() {
+    // Regression (N2): tunnels on ports other than 443/8443 used to be
+    // relayed unscanned, so `CONNECT allowed.host:80` carried secrets past
+    // the DLP layer.
+    let (origin, seen) = start_recording_origin();
+    let p = start_proxy(Config::default(), &["127.0.0.1"], None);
+    let secret = "AKIAIOSFODNN7EXAMPLE";
+    let (head, out) = connect_raw(
+        &p.socket,
+        "127.0.0.1",
+        origin.port(),
+        format!("GET /?k={secret} HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n")
+            .as_bytes(),
+    );
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(out.starts_with("HTTP/1.1 403"), "{out}");
+    assert!(out.contains("aws_access_key_id"), "{out}");
+    assert_eq!(p.hooks.find("dlp.block").unwrap()["location"], "url");
+    let (_, out) = connect_raw(
+        &p.socket,
+        "127.0.0.1",
+        origin.port(),
+        b"GET /clean HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n",
+    );
+    assert!(out.contains("echo:GET /clean"), "{out}");
+    let req = p.hooks.find("net.request").unwrap();
+    assert_eq!(req["inspected"], true, "{req}");
+    assert_eq!(req["tls"], false, "{req}");
+    let seen = String::from_utf8_lossy(&seen.lock().unwrap()).to_string();
+    assert!(seen.contains("GET /clean"), "{seen}");
+    assert!(
+        !seen.contains(secret),
+        "origin received the secret:\n{seen}"
+    );
+}
+
+#[test]
+fn unscannable_tunnel_is_refused_unless_passthrough() {
+    let (origin, seen) = start_recording_origin();
+    let p = start_proxy(Config::default(), &["127.0.0.1"], None);
+    let (head, out) = connect_raw(
+        &p.socket,
+        "127.0.0.1",
+        origin.port(),
+        b"\x00\x01opaque AKIAIOSFODNN7EXAMPLE",
+    );
+    assert!(head.starts_with("HTTP/1.1 200"), "{head}");
+    assert!(out.is_empty(), "{out}");
+    let deny = p.hooks.find("net.deny").unwrap();
+    assert!(
+        deny["rule"]
+            .as_str()
+            .unwrap()
+            .contains("neither TLS nor HTTP"),
+        "{deny}"
+    );
+    assert!(seen.lock().unwrap().is_empty(), "origin was contacted");
+
+    // The same bytes are tunnelled, and logged unscanned, for passthrough.
+    let p = start_proxy(
+        Config {
+            passthrough: vec!["127.0.0.1".into()],
+            ..Config::default()
+        },
+        &["127.0.0.1"],
+        None,
+    );
+    let _ = connect_raw(
+        &p.socket,
+        "127.0.0.1",
+        origin.port(),
+        b"\x00\x01opaque\r\n\r\n",
+    );
+    assert_eq!(p.hooks.find("net.tunnel").unwrap()["inspected"], false);
+}
+
+#[test]
+fn sniffing_classifies_first_bytes() {
+    use agentkeep_proxy::server::{sniff, Sniffed};
+    assert_eq!(sniff(0x16), Sniffed::Tls);
+    for b in b"GPDHOCT" {
+        assert_eq!(sniff(*b), Sniffed::Http);
+    }
+    for b in [0u8, 0x80, b'g', b'{', b'\r'] {
+        assert_eq!(sniff(b), Sniffed::Other);
+    }
 }

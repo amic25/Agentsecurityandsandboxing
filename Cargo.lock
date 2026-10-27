@@ -16,6 +16,9 @@ dependencies = [
  "agentkeep-tui",
  "anyhow",
  "clap",
+ "rcgen",
+ "rustls",
+ "rustls-pki-types",
  "serde",
  "serde_json",
  "tempfile",
@@ -62,6 +65,7 @@ dependencies = [
 name = "agentkeep-proxy"
 version = "0.0.1"
 dependencies = [
+ "agentkeep-audit",
  "aho-corasick",
  "bytes",
  "http",
