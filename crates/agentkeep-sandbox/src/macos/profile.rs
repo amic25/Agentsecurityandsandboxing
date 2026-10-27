@@ -490,6 +490,10 @@ fn files(out: &mut String, s: &Sets) {
     }
     meta.extend(s.sockets.iter().cloned());
     rule(out, "allow", "file-read-metadata", &literals(&meta));
+    // dyld reads the root directory while starting every process on macOS
+    // 15; without this nothing starts (seen as SIGABRT on the CI runners).
+    // It lists the names at `/`, never what is inside them.
+    out.push_str("(allow file-read-data (literal \"/\"))\n");
     rule(out, "allow", "file-read*", &subpaths(&s.read));
     rule(out, "allow", "file-read*", &literals(&s.read_files));
     rule(out, "allow", "file-read* file-write*", &subpaths(&s.write));
@@ -697,6 +701,16 @@ mod tests {
             .map(|(i, _)| i)
             .last()
             .unwrap_or_else(|| panic!("`{needle}` not in profile:\n{text}"))
+    }
+
+    #[test]
+    fn root_directory_is_listable_and_nothing_below_it() {
+        let p = profile();
+        assert!(
+            p.contains("(allow file-read-data (literal \"/\"))\n"),
+            "{p}"
+        );
+        assert!(!p.contains("(subpath \"/\")"), "{p}");
     }
 
     #[test]

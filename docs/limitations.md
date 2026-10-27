@@ -168,7 +168,10 @@ is inherited by every child process.
   ("Operation not permitted") instead of `ENOENT`. `stat` succeeds on the
   directories *above* every allowed path (so `realpath`, `git` and `cargo`
   work), which reveals that, for example, `/Users/you` exists, but not what
-  is in it. A hidden path such as `~/.ssh` is denied for reading, writing
+  is in it. The root directory itself can also be listed, because dyld
+  reads it while starting every process on macOS 15, so the names of the
+  top-level directories (`/Users`, `/Applications`, anything else created
+  at `/`) are visible; nothing below them is. A hidden path such as `~/.ssh` is denied for reading, writing
   and executing even when a parent is allowed, and the directories above a
   hidden path cannot be renamed or removed (otherwise moving the parent
   would carry the hidden path out from under its rule).
@@ -176,7 +179,11 @@ is inherited by every child process.
   `HOME` and `TMPDIR` pointing at fresh directories in the session scratch
   directory (removed at the end). The real home stays denied. Programs
   that ignore `HOME` and look up the home directory from the user database
-  get the real path and are refused. `/tmp` and `/var/tmp` are the host's
+  get the real path and are refused. Policy paths under `~` (for example
+  `read_only = ["~/.cargo"]`) mean the real home, so they are reachable at
+  their real location but not under the private `HOME`: a tool that looks
+  for `$HOME/.cargo` does not find them unless its own variable
+  (`CARGO_HOME` and the like) points there. `/tmp` and `/var/tmp` are the host's
   shared directories and are **not** writable: programs that hard-code
   `/tmp` instead of honouring `TMPDIR` fail. Per-user cache directories
   under `/var/folders/.../C` are not available either.

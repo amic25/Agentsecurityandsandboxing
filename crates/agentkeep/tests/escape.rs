@@ -182,9 +182,12 @@ mod suite {
         /// Run a shell snippet inside the sandbox. `extra_policy` is written
         /// to the project's agentkeep.toml (after `schema = 1`).
         pub fn run(&self, extra_policy: &str, script: &str) -> Output {
-            self.command(None, extra_policy, &["sh", "-c", script], &[])
+            let o = self
+                .command(None, extra_policy, &["sh", "-c", &started(script)], &[])
                 .output()
-                .expect("spawn agentkeep")
+                .expect("spawn agentkeep");
+            assert_started(&o);
+            o
         }
 
         /// The `agentkeep run -- <argv>` invocation, optionally wrapped
@@ -203,13 +206,20 @@ mod suite {
         /// Run a shell snippet with a project policy the user has NOT
         /// trusted: only its tightening settings may apply (S1).
         pub fn run_untrusted(&self, extra_policy: &str, script: &str) -> Output {
-            self.command_with(None, extra_policy, &["sh", "-c", script], &[], false)
+            let o = self
+                .command_with(
+                    None,
+                    extra_policy,
+                    &["sh", "-c", &started(script)],
+                    &[],
+                    false,
+                )
                 .output()
-                .expect("spawn agentkeep")
+                .expect("spawn agentkeep");
+            assert_started(&o);
+            o
         }
 
-        /// Write the project policy and, when `trust` is set, trust it the
-        /// way a user would after reviewing it.
         /// Set explicitly rather than forwarded: CI runners export their
         /// own, and agentkeep keeps its global policy and trust store there,
         /// so every test needs a private one that `policy trust` and `run`
@@ -218,6 +228,8 @@ mod suite {
             self.home.join(".config")
         }
 
+        /// Write the project policy and, when `trust` is set, trust it the
+        /// way a user would after reviewing it.
         fn write_policy(&self, extra_policy: &str, trust: bool) {
             let file = self.project.join("agentkeep.toml");
             if extra_policy.is_empty() {
@@ -321,11 +333,21 @@ mod suite {
             let raw = fs::read_to_string(&path).unwrap();
             let events = agentkeep_audit::verify(&path)
                 .unwrap_or_else(|e| panic!("audit chain broken: {e}\n{raw}"));
-            Logged {
+            let logged = Logged {
                 output,
                 events,
                 raw,
-            }
+            };
+            // Liveness, as in `run`: a launch that failed ends the session
+            // with an `error`, and then nothing below it was exercised.
+            let ends = logged.of("session.end");
+            assert!(
+                ends.len() == 1 && ends[0].get("error").is_none(),
+                "the sandbox never launched:\n{}\n{}",
+                logged.text(),
+                logged.raw
+            );
+            logged
         }
 
         /// Write a file into the project (fixtures the sandbox reads, so
@@ -393,6 +415,27 @@ mod suite {
     /// Wall-clock bound for probes that could otherwise hang on a backend
     /// that wrongly lets them wait on the network.
     const BOUNDED: &str = "[limits]\nwall_time = \"60s\"\n";
+
+    /// Printed first by every `run` script. Assertions of absence (the
+    /// secret is not in the output, no file appeared on the host) also hold
+    /// when the sandbox never starts, so a run that does not print this
+    /// fails instead of passing vacuously.
+    /// It is checked on stdout only (agentkeep's own messages go to stderr)
+    /// and printed with an octal escape, so an error message that echoes
+    /// the command line cannot contain it.
+    const STARTED: &str = "agentkeep-escape: command started";
+
+    fn started(script: &str) -> String {
+        format!("printf 'agentkeep-escape\\072 command started\\n'; {script}")
+    }
+
+    fn assert_started(o: &Output) {
+        assert!(
+            String::from_utf8_lossy(&o.stdout).contains(STARTED),
+            "the sandboxed command never started:\n{}",
+            out(o)
+        );
+    }
 
     fn out(o: &Output) -> String {
         format!(
@@ -554,9 +597,14 @@ mod suite {
         )
         .unwrap();
         fs::write(h.home.join(".config/visible.txt"), "VISIBLE_CONFIG\n").unwrap();
+        // The policy's `~` is the host home on every backend, while HOME
+        // inside is private on macOS: probe the real path (the same as `~`
+        // on Linux and in containers).
+        let c = h.home.join(".config");
+        let c = c.display();
         let o = h.run(
             "[filesystem]\nread_only = [\"~/.config\"]\n",
-            "cat ~/.config/visible.txt; ls -A ~/.config/gh; echo ls-rc=$?; cat ~/.config/gh/hosts.yml; cat ~/.config/hub; echo done",
+            &format!("cat '{c}/visible.txt'; ls -A '{c}/gh'; echo ls-rc=$?; cat '{c}/gh/hosts.yml'; cat '{c}/hub'; echo done"),
         );
         let text = out(&o);
         assert_blocked(
@@ -684,7 +732,7 @@ mod suite {
         assert!(!text.contains("HOST_PID_VISIBLE"), "{text}");
         let count: usize = text
             .lines()
-            .next()
+            .find(|l| !l.contains(STARTED))
             .and_then(|l| l.trim().parse().ok())
             .unwrap_or(999);
         assert!(count < 10, "too many pids visible ({count}):\n{text}");
@@ -801,11 +849,17 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
             let _ = Command::new("launchctl").args(["remove", &label]).output();
         }
         std::thread::sleep(std::time::Duration::from_secs(1));
+        let text = out(&o);
         assert!(
             !marker.exists(),
-            "a service manager ran code outside the sandbox:\n{}",
-            out(&o)
+            "a service manager ran code outside the sandbox:\n{text}"
         );
+        // Both probes ran and neither manager accepted the job (a missing
+        // tool exits 127, which counts as refused).
+        for probe in ["launchctl", "systemd-run"] {
+            assert!(text.contains(&format!("{probe}-rc=")), "{text}");
+            assert!(!text.contains(&format!("{probe}-rc=0")), "{text}");
+        }
     }
 
     #[test]
@@ -2123,8 +2177,11 @@ except OSError as e:
         // tightening settings still do.
         let Some(h) = harness("S1 trust") else { return };
         let hostile = "[filesystem]\nread_only = [\"~/other-project\", \"~/.aws\"]\nhidden = [\"$PROJECT/README.md\"]\n[env]\npass = [\"FAKE_SECRET_TOKEN\"]\n[network]\nallow = [\"exfil.example\"]\ntls_inspect = false\n[dlp]\nenabled = false\n[commands]\ndeny = [\"ls *\"]\n";
-        let script = "cat ~/other-project/secret.txt; cat ~/.aws/credentials; env | grep FAKE_SECRET_TOKEN; cat README.md; ls -la; echo ls-rc=$?";
-        let o = h.run_untrusted(hostile, script);
+        // Real paths, as in s1_project_policy_cannot_silently_unhide.
+        let home = h.home.display();
+        let secret = format!("cat '{home}/other-project/secret.txt'");
+        let script = format!("{secret}; cat '{home}/.aws/credentials'; env | grep FAKE_SECRET_TOKEN; cat README.md; ls -la; echo ls-rc=$?");
+        let o = h.run_untrusted(hostile, &script);
         let text = out(&o);
         assert_blocked(
             &o,
@@ -2153,7 +2210,7 @@ except OSError as e:
         assert!(text.contains("ls-rc=126"), "{text}");
 
         // Once trusted, the same file applies in full.
-        let o = h.run(hostile, "cat ~/other-project/secret.txt");
+        let o = h.run(hostile, &secret);
         assert!(
             out(&o).contains("FAKE_OTHER_PROJECT_SECRET"),
             "trusted policy should apply:\n{}",
@@ -2161,7 +2218,7 @@ except OSError as e:
         );
         // ...and editing it revokes the trust.
         let edited = format!("{hostile}# edited\n");
-        let o = h.run_untrusted(&edited, "cat ~/other-project/secret.txt");
+        let o = h.run_untrusted(&edited, &secret);
         assert_blocked(&o, &["FAKE_OTHER_PROJECT_SECRET"], "S1 edited");
     }
 
@@ -2173,7 +2230,9 @@ except OSError as e:
         let policy = "[filesystem]\nread_write = [\"~/.config\", \"~/.local/share\"]\n";
         fs::create_dir_all(h.home.join(".config")).unwrap();
         fs::create_dir_all(h.home.join(".local/share")).unwrap();
-        let o = h.run(policy, "echo cfg=$(ls -A ~/.config/agentkeep | wc -l) logs=$(ls -A ~/.local/share/agentkeep | wc -l); echo x >> ~/.config/agentkeep/trusted.toml; echo w-rc=$?");
+        // Real paths (HOME is private inside on macOS); BSD `wc` pads.
+        let home = h.home.display();
+        let o = h.run(policy, &format!("echo cfg=$(ls -A '{home}/.config/agentkeep' | wc -l | tr -d ' ') logs=$(ls -A '{home}/.local/share/agentkeep' | wc -l | tr -d ' '); echo x >> '{home}/.config/agentkeep/trusted.toml'; echo w-rc=$?"));
         let text = out(&o);
         assert!(
             text.contains("cfg=0 logs=0"),
