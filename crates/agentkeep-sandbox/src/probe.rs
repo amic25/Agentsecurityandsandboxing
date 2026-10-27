@@ -60,11 +60,20 @@ impl Capabilities {
     /// - `net_namespace`: only a loopback interface exists.
     /// - `seccomp`, `landlock`: those kernel filters are active.
     /// - `no_caps`: no Linux capabilities and `no_new_privs` set.
-    /// - `rlimits`: rlimit-based resource limits.
+    /// - `rlimits`: memory (`RLIMIT_AS` or cgroup) and pids limits that
+    ///   count only the sandbox's own processes.
     /// - `cgroup_limits`: memory and pid limits live in a cgroup that is
     ///   visible (read-only) inside the sandbox, so they can be checked from
     ///   there. Container runtimes only: the Linux backend's cgroup is not
     ///   mounted inside its sandbox.
+    /// - `no_core_dumps`: `RLIMIT_CORE` is 0.
+    /// - `nproc_per_user`: `RLIMIT_NPROC` is set, but counts every process
+    ///   of the user (macOS), so it is an approximate fork-bomb brake.
+    ///
+    /// Seatbelt claims only `fs_denied`, `net_isolation`, `no_core_dumps`
+    /// and `nproc_per_user`. It does not claim `ptrace_denied`: the profile
+    /// does not filter `ptrace(2)` and the suite's probe for it is a Linux
+    /// system call sequence.
     pub fn controls(&self) -> Vec<&'static str> {
         let mut c = Vec::new();
         if self.mount_namespace {
@@ -75,7 +84,7 @@ impl Capabilities {
         if self.pid_namespace {
             c.push("pid_isolation");
         }
-        if self.seccomp || self.seatbelt {
+        if self.seccomp {
             c.push("ptrace_denied");
         }
         if self.seccomp && self.mount_namespace {
@@ -97,7 +106,12 @@ impl Capabilities {
             c.push("no_caps");
         }
         if self.rlimits {
-            c.push("rlimits");
+            c.push("no_core_dumps");
+            if self.seatbelt {
+                c.push("nproc_per_user");
+            } else {
+                c.push("rlimits");
+            }
         }
         if self.cgroup_v2 && self.container_runtime.is_some() {
             c.push("cgroup_limits");
@@ -156,6 +170,58 @@ impl Probe {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linux_controls() {
+        let caps = Capabilities {
+            mount_namespace: true,
+            pid_namespace: true,
+            net_namespace: true,
+            landlock_abi: 4,
+            seccomp: true,
+            cgroup_v2: false,
+            rlimits: true,
+            no_new_privs: true,
+            seatbelt: false,
+            container_runtime: None,
+        };
+        let c = caps.controls();
+        for want in [
+            "fs_absent",
+            "fs_denied",
+            "hardlink_safe",
+            "pid_isolation",
+            "ptrace_denied",
+            "no_mount",
+            "net_isolation",
+            "net_namespace",
+            "seccomp",
+            "landlock",
+            "rlimits",
+            "no_core_dumps",
+        ] {
+            assert!(c.contains(&want), "{want} missing from {c:?}");
+        }
+        assert!(!c.contains(&"nproc_per_user"));
+    }
+
+    #[test]
+    fn seatbelt_claims_only_what_its_profile_enforces() {
+        let caps = Capabilities {
+            seatbelt: true,
+            rlimits: true,
+            ..Capabilities::default()
+        };
+        assert_eq!(
+            caps.controls(),
+            vec![
+                "fs_denied",
+                "net_isolation",
+                "no_core_dumps",
+                "nproc_per_user"
+            ]
+        );
+    }
 
     fn namespaces() -> Capabilities {
         Capabilities {

@@ -107,6 +107,13 @@ pub struct LaunchPlan {
     pub shim: Option<ShimConfig>,
     /// Egress proxy wiring. `None` means no network at all.
     pub proxy: Option<ProxyPlan>,
+    /// Host paths that must never be reachable from inside, such as the
+    /// approver socket (threat model B3). A mount-namespace backend never
+    /// mounts them; a backend that shares the host's file tree (macOS)
+    /// denies them explicitly and refuses to start if an allowed path would
+    /// contain one.
+    #[serde(default)]
+    pub host_only: Vec<PathBuf>,
     /// Apply a Landlock ruleset in addition to mounts when available.
     pub landlock: bool,
     /// Apply the seccomp deny-list.
@@ -156,6 +163,7 @@ mod tests {
             approval_socket: None,
             shim: None,
             proxy: None,
+            host_only: vec!["/tmp/agentkeep.x/approve.sock".into()],
             landlock: true,
             seccomp: true,
             inner_uid: 1000,

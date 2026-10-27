@@ -13,7 +13,6 @@ use std::ffi::CString;
 use std::fs;
 use std::io::{BufRead, BufReader, Seek, Write};
 use std::os::fd::{AsFd, FromRawFd, OwnedFd};
-use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
@@ -376,9 +375,6 @@ pub fn install_supervisor_signals() {
     sys::record_signal(libc::SIGHUP);
 }
 
-/// True when `argv[0]` names something other than agentkeep itself, which
-/// means we were started through a command shim.
-pub fn invoked_as_shim(argv0: &str) -> Option<String> {
-    let base = Path::new(argv0).file_name()?.to_str()?.to_string();
-    (base != "agentkeep" && !base.starts_with("agentkeep-")).then_some(base)
-}
+/// Kept for callers that predate the platform-neutral
+/// [`crate::invoked_as_shim`].
+pub use crate::invoked_as_shim;

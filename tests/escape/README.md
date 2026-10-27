@@ -9,7 +9,15 @@ command. Each test is named after its threat id and must fail closed.
 
 Run it with `tests/escape/run.sh`. It never skips silently: on a host without
 a usable backend every test prints `UNTESTED ON THIS HOST`, and with
-`AGENTKEEP_REQUIRE_SANDBOX=1` that is a failure.
+`AGENTKEEP_REQUIRE_SANDBOX=1` that is a failure. CI sets it on the Linux and
+macOS runners and pins the backend with `AGENTKEEP_ESCAPE_BACKEND`.
+
+Tests gated on a control the backend does not claim print `NOT APPLICABLE`;
+universal ones (no secret leaks, the host is never modified, the proxy is
+the only way out, the approver socket is unreachable) run on every backend.
+Host paths are probed through `~` and through their absolute location,
+because on macOS `HOME` inside the sandbox is a private directory and only
+the absolute probes exercise the Seatbelt profile.
 
 The network tests start their own origins on host `127.0.0.1` (plain HTTP,
 and TLS with a throwaway self-signed certificate trusted through

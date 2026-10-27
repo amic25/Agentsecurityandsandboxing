@@ -576,6 +576,7 @@ mod tests {
                 ca_bundle_host: "/tmp/agentkeep.s/ca-bundle.pem".into(),
                 ca_bundle_sandbox: "/run/agentkeep/ca-bundle.pem".into(),
             }),
+            host_only: vec!["/tmp/agentkeep.s/approve.sock".into()],
             landlock: true,
             seccomp: true,
             inner_uid: 1000,

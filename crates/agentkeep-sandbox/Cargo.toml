@@ -26,6 +26,12 @@ seccompiler = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "io-util"] }
 
+# Already in the tree for Linux; macOS needs it for the few calls std does
+# not wrap (setrlimit, tcsetpgrp, killpg, proc_listpids). See
+# docs/dependencies.md.
+[target.'cfg(target_os = "macos")'.dependencies]
+libc = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 

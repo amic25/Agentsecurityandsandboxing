@@ -45,18 +45,30 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
+        # `backend` is the sandbox the escape suite must exercise on that
+        # runner; empty means none exists there yet (UNTESTED is allowed).
         include:
           - name: linux-x86_64
             os: ubuntu-24.04
+            backend: linux
           - name: linux-arm64
             os: ubuntu-24.04-arm
+            backend: linux
           - name: macos-intel
             os: macos-15-intel
+            backend: macos
           - name: macos-arm64
             os: macos-15
+            backend: macos
           - name: windows-x86_64
             os: windows-2025
+            backend: ""
     runs-on: ${{ matrix.os }}
+    env:
+      # Where a backend exists the sandbox must actually be exercised:
+      # UNTESTED is a failure, and the suite runs against that backend only.
+      AGENTKEEP_REQUIRE_SANDBOX: ${{ matrix.backend != '' && '1' || '' }}
+      AGENTKEEP_ESCAPE_BACKEND: ${{ matrix.backend }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -79,17 +91,24 @@ jobs:
           for t in curl python3 strace; do command -v "$t" >/dev/null || missing="$missing $t"; done
           if [ -n "${missing:-}" ]; then sudo apt-get update -qq && sudo apt-get install -y -qq $missing; fi
       - run: cargo build --workspace --locked
+      - name: Which backends work here
+        shell: bash
+        run: |
+          uname -a
+          if [ "$RUNNER_OS" = "macOS" ]; then sw_vers; fi
+          cargo run --locked --quiet -- doctor || true
       - name: Unit, property and escape tests
         shell: bash
-        env:
-          # On Linux the sandbox must actually be exercised; UNTESTED is a failure.
-          AGENTKEEP_REQUIRE_SANDBOX: ${{ runner.os == 'Linux' && '1' || '' }}
         run: cargo test --workspace --locked -- --nocapture
       - name: Escape suite summary
         if: runner.os != 'Windows'
-        env:
-          AGENTKEEP_REQUIRE_SANDBOX: ${{ runner.os == 'Linux' && '1' || '' }}
         run: tests/escape/run.sh
+      - name: Seatbelt denials (for diagnosing a failed macOS run)
+        if: failure() && runner.os == 'macOS'
+        run: |
+          log show --style compact --last 30m \
+            --predicate 'sender == "Sandbox" OR eventMessage CONTAINS "deny("' \
+            | tail -n 400 || true
       - name: Smoke-test the binary
         shell: bash
         run: |

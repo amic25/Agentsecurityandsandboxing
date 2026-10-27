@@ -111,8 +111,8 @@ Status key: **enforced** (shipped with an escape test), **planned (phase N)**,
 | N1 | Send files or secrets to an attacker's server | T1–T4 | Domain allowlist in the proxy; deny by default; denied requests logged with host and rule | enforced (`n1_denied_hosts_get_403_and_are_never_contacted`; control `positive_control_allowed_host_works_through_the_proxy`) |
 | N2 | Exfiltrate through an allowed domain (a GitHub gist, an npm publish, a pastebin on an allowed CDN) | T1–T4 | DLP scans the request line, headers and body of every request on plain HTTP and inside inspected `CONNECT` tunnels, whatever the port (a tunnel is classified by its first bytes; anything that is neither TLS nor HTTP is refused unless the host is `passthrough`); `ask` mode for sensitive endpoints in presets (for example `api.github.com` writes). **Data that is not a recognisable secret, or a secret encoded or split by a determined sender, can still leave through an allowed domain.** | partial: recognisable secrets enforced (`n2_secrets_are_blocked_over_plain_http_and_never_reach_the_origin`, `n2_secrets_are_blocked_inside_an_inspected_tls_tunnel`); passthrough hosts unscanned and logged so (`n2_passthrough_hosts_are_tunnelled_unscanned_and_logged_as_such`); preset `ask` rules not built; residual risk documented |
 | N3 | DNS exfiltration (`<secret>.attacker.example`) | T1–T4 | No resolver reachable from the sandbox on Linux; names are resolved by the proxy and only for allowed hosts. macOS and container backends route DNS through the proxy's resolver as well; see per-backend limitations | enforced on the Linux and container backends (`n3_n4_no_network_and_no_dns`; `n3_dns_cannot_leave_and_denied_names_are_never_resolved`: no UDP route to any resolver, and under `strace` the supervisor makes no lookup or connection for a denied name) |
-| N4 | Bypass the proxy with a raw socket, a different port, UDP, QUIC | T3, T4 | Linux: no network interface besides loopback, Landlock v4 restricts TCP connects to the proxy port. macOS: Seatbelt denies `network-outbound` except the proxy socket. Container: `--network none` plus a Unix-socket relay | enforced on the Linux and container backends (`n3_n4_no_network_and_no_dns`: loopback only; `positive_control_allowed_host_works_through_the_proxy`: a host origin reachable through the relay is unreachable directly) |
-| N5 | Reach cloud metadata, the LAN, or localhost services of the host | T1–T4 | Private ranges and link-local are denied by the proxy regardless of the allowlist unless explicitly allowed with `network.allow_private = true`. Names are checked after resolution, so a public name that resolves to a private address is refused too. Host localhost is a different network namespace | enforced (`n5_private_ranges_and_cloud_metadata_are_refused`); link-local and cloud metadata addresses are refused even with `allow_private = true` (same test) |
+| N4 | Bypass the proxy with a raw socket, a different port, UDP, QUIC | T3, T4 | Linux: no network interface besides loopback, Landlock v4 restricts TCP connects to the proxy port. macOS: Seatbelt denies `network-outbound` except the supervisor's loopback relay port and the decision socket. Container: `--network none` plus a Unix-socket relay | enforced on the Linux and container backends (`n3_n4_no_network_and_no_dns`: loopback only; `positive_control_allowed_host_works_through_the_proxy`: a host origin reachable through the relay is unreachable directly); macOS implemented, UNVERIFIED until macOS CI passes `n3_n4_*` |
+| N5 | Reach cloud metadata, the LAN, or localhost services of the host | T1–T4 | Private ranges and link-local are denied by the proxy regardless of the allowlist unless explicitly allowed with `network.allow_private = true`. Names are checked after resolution, so a public name that resolves to a private address is refused too. Host localhost is a different network namespace on Linux and the container backend; on macOS the profile refuses every loopback port but the relay's | enforced (`n5_private_ranges_and_cloud_metadata_are_refused`); link-local and cloud metadata addresses are refused even with `allow_private = true` (same test); host loopback services: `n5_host_loopback_services_are_unreachable` on every backend, macOS UNVERIFIED |
 | N6 | TLS inspection leaks: the ephemeral CA private key, or minted certificates reused across sessions | — (weakness in our own control) | Key generated per run in supervisor memory, never written; the CA certificate given to the sandbox is public; passthrough mode exists for pinned clients; inspection can be disabled | enforced (`n6_session_ca_is_per_run_and_its_key_never_reaches_the_sandbox`: a new CA per session, no private key visible in the sandbox or the log); "never written to host disk" holds by construction, not by test |
 | N7 | WebSocket or long-lived streams used to move data without inspection | T1–T4 | Allowlist still applies; the upgrade handshake is scanned like any request; the stream after it is tunneled and logged as *unscanned* | detect-only, tested (`n7_websocket_upgrade_is_tunnelled_and_logged_unscanned`) |
 | N8 | Steer an allowed shared front end (CDN, cloud load balancer) to a different tenant with a different SNI or `Host` header | T1–T4 | Inside inspected tunnels the TLS server name must equal the `CONNECT` host; on every request the `Host` header must name the destination | enforced (proxy e2e `tls_server_name_must_match_the_connect_host`, `host_header_must_match_the_destination`) |
@@ -121,7 +121,7 @@ Status key: **enforced** (shipped with an escape test), **planned (phase N)**,
 
 | Id | Threat | Attacker | Control | Status |
 |---|---|---|---|---|
-| C1 | `git push` to a remote, force-push, branch deletion | T1, T4 | `commands.ask` default includes `git push*`; HTTPS pushes are also visible to the proxy as `git-receive-pack` requests and can be gated there, which is not bypassable from inside | shim enforced, advisory (`c1_c2_*`); proxy gate planned (2) |
+| C1 | `git push` to a remote, force-push, branch deletion | T1, T4 | `commands.ask` default includes `git push*`; HTTPS pushes are also visible to the proxy as `git-receive-pack` requests and can be gated there, which is not bypassable from inside | shim enforced, advisory (`c1_c2_*`); proxy gate not implemented yet (`limitations.md`) |
 | C2 | Destructive commands (`rm -rf`, `git reset --hard`, `git clean -fdx`) | T4 | `commands.ask` and `commands.deny` through the PATH shim (advisory) and, on Linux when it lands, seccomp user-notify on `execve` (enforced). The filesystem layer bounds the damage to the project either way | advisory, tested (`c1_c2_*`); enforced execve interception not yet built |
 | C3 | Privilege escalation: `sudo`, `su`, setuid binaries, `pkexec` | T3, T4 | `no_new_privs` makes setuid bits inert; user namespace maps the user to an unprivileged uid; `sudo` is denied by the shim too | enforced (`c3_*`) |
 | C4 | Fork bombs, memory exhaustion, CPU burn, runaway sessions | T3, T4 | cgroup v2 limits where delegated, rlimits otherwise, wall-clock kill of the whole pid namespace | enforced (`c4_*`, wall-time control); cpu_percent only with cgroups |
@@ -171,23 +171,31 @@ What each backend can enforce. "Partial" entries are explained in
 `limitations.md`. This table is regenerated by `agentkeep run --explain` once
 backends exist, so it never drifts from the code.
 
+The macOS column describes what `crates/agentkeep-sandbox/src/macos/`
+implements. **It is UNVERIFIED until the escape suite has passed on the
+macOS CI runners**; the controls it claims (`agentkeep doctor`) are
+`fs_denied`, `net_isolation`, `no_core_dumps` and `nproc_per_user`, and only
+the tests gated on those (plus the universal ones) run there.
+
 | Control | Linux | macOS (Seatbelt) | Container | WSL2 |
 |---|---|---|---|---|
-| Project rw, rest absent (F1, F2) | yes | partial: deny rules over a visible tree, no mount namespace | yes: the same mount plan bound into an empty image, read-only root | yes (Linux backend inside WSL); `/mnt/*` must be hidden explicitly |
-| Fresh `/proc`, pid isolation (F4, F5) | yes | no pid namespace; `ptrace` denied by profile | yes (the runtime's `/proc`, no `hidepid`) | yes |
-| seccomp deny-list (C5) | yes | no (Seatbelt syscall filtering is coarse) | yes: the runtime's default profile plus ours, applied by agentkeep's init | yes |
-| No network except proxy (N4) | yes | partial: profile-level deny; relies on `sandbox-exec` | yes: `--network none`, loopback relay to the proxy socket | yes |
-| DNS isolation (N3) | yes | partial | yes | yes |
-| cgroup limits (C4) | yes if delegated, else rlimits | rlimits only | yes when the runtime enforces `--memory`/`--pids-limit` (rootful; rootless Podman with delegated controllers), else rlimits | yes if delegated |
-| Hardlink/symlink tricks (F3) | yes | partial: symlinks resolved by the profile, hardlinks not covered | yes | yes |
+| Project rw, rest absent (F1, F2) | yes | partial: rest denied (`EPERM`), not absent; no mount namespace; private `HOME`/`TMPDIR`; `stat` works on parents of allowed paths | yes: the same mount plan bound into an empty image, read-only root | yes (Linux backend inside WSL); `/mnt/*` must be hidden explicitly |
+| Hidden paths under an allowed parent (F1) | yes (empty tmpfs or file) | yes: denied for read, write and exec, last rule wins; parents cannot be renamed | yes (empty tmpfs or file, also against the runtime's tmpfs copy-up) | yes |
+| Fresh `/proc`, pid isolation (F4, F5) | yes | no pid namespace; signals and process info limited to the sandbox; process listing via `sysctl` refused; `ptrace` not filtered | yes (the runtime's `/proc`, no `hidepid`) | yes |
+| seccomp deny-list (C5) | yes | no (Seatbelt does not filter system calls) | yes: the runtime's default profile plus ours, applied by agentkeep's init | yes |
+| No network except proxy (N4, N5) | yes | partial: profile allows only the supervisor's loopback relay port and the decision socket on the shared loopback; relies on `sandbox-exec` | yes: `--network none`, loopback relay to the proxy socket | yes |
+| DNS isolation (N3) | yes | partial: mDNSResponder socket and service refused; whether `opendirectoryd` resolves names is checked by the suite | yes | yes |
+| Approver socket unreachable (B3) | yes (never mounted) | yes: denied by name, and the profile refuses to build if an allowed tree contains it | yes (never mounted) | yes |
+| Resource limits (C4) | cgroup v2 if delegated, else rlimits | `RLIMIT_CORE=0`; `RLIMIT_NPROC` per user (approximate); memory and CPU not enforced | yes when the runtime enforces `--memory`/`--pids-limit` (rootful; rootless Podman with delegated controllers), else rlimits | yes if delegated |
+| Hardlink/symlink tricks (F3) | yes | partial: symlinks resolve to the real path the profile checks; hardlink creation never allowed, but not claimed as `hardlink_safe` | yes | yes |
 | Landlock second layer | yes (kernel 5.13+ with Landlock enabled) | no | yes: init applies it and refuses to start if the runtime hides it | as Linux, if the WSL kernel has Landlock |
-| No capabilities, `no_new_privs` (C3) | yes | n/a | yes: `--cap-drop=ALL`, `no-new-privileges`, set again by init | as Linux |
+| Privilege escalation (C3) | yes (`no_new_privs`, no capabilities) | partial: setuid runs but stays confined; sudoers hidden | yes: `--cap-drop=ALL`, `no-new-privileges`, set again by init | as Linux |
 | Trust in the runtime | kernel only | kernel and `sandbox-exec` | the container runtime too; rootful Docker or Podman means a root daemon (prefer rootless Podman) | kernel and WSL2 |
 
 The Container column holds for Linux hosts only (`limitations.md` says why).
 It is verified by the escape suite with Docker (rootful) and Podman (rootful
 and rootless) on a cgroup v1 host; the `escape-container` CI job runs the
-same suite with Docker on cgroup v2 runners.
+same suite with Docker and rootless Podman on cgroup v2 runners.
 
 ## 6. Residual risks we accept and document
 
