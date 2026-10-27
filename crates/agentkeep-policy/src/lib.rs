@@ -26,6 +26,7 @@ pub mod merge;
 pub mod parse;
 pub mod resolved;
 pub mod schema;
+pub mod trust;
 
 pub use decide::{Compiled, Decision, Request};
 pub use merge::{merge, Layer, Source, Warning};

@@ -144,6 +144,7 @@ pub fn run(globals: &Globals, args: &RunArgs) -> Result<ExitCode> {
             "mounts": plan.mounts,
             "limits": plan.limits,
             "network": proxy.describe(),
+            "project_trust": loaded.project_trust,
         }),
     );
 
@@ -276,7 +277,7 @@ fn shim_commands(policy: &Policy) -> Vec<String> {
     out
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)] // one mount list, read top to bottom
 fn build_plan(
     loaded: &Loaded,
     host: &Host,
@@ -333,7 +334,20 @@ fn build_plan(
             ));
         }
     }
-    for p in &policy.hidden {
+    // agentkeep's own state is never visible, whatever the policy exposes:
+    // the session logs and the trust store (a sandbox that could write it
+    // could trust its own project policy).
+    let own_state = [
+        policy.audit_dir.clone(),
+        load::trust_store_path(host)
+            .parent()
+            .map_or_else(PathBuf::new, Path::to_path_buf),
+    ];
+    for p in policy
+        .hidden
+        .iter()
+        .chain(own_state.iter().filter(|p| !p.as_os_str().is_empty()))
+    {
         mounts.push(Mount {
             source: PathBuf::new(),
             target: p.clone(),

@@ -126,9 +126,40 @@ command rules as a guard rail, not a boundary.
 | `dir` | `~/.local/share/agentkeep/sessions` | One subdirectory per session with `events.jsonl` |
 | `redact` | `true` | Replace anything the DLP detectors recognise (credential formats, `dlp.block_values`, `env.pass` secrets) in every logged string with `[REDACTED:<detector>]`. `dlp.block_values` are never logged either way |
 
+## Trust for project files
+
+A project's `agentkeep.toml` comes with the repository, so agentkeep does
+not apply it in full until you trust it (threat model S1). Until then only
+its *tightening* settings apply:
+
+| Applies from an untrusted project file | Ignored until the file is trusted |
+|---|---|
+| `filesystem.hidden` | `filesystem.project`, `read_only`, `read_write` |
+| `network.deny`; `tls_inspect = true`; `allow_private = false` | `network.allow`, `ask`, `passthrough`, `trusted_cas`; `tls_inspect = false`; `allow_private = true` |
+| `dlp.block_values`; `dlp.enabled = true` | `dlp.enabled = false`, `report_only`, `allow_provider_keys_to` |
+| `commands.ask`, `commands.deny` | everything in `[env]` |
+| `mcp.deny_tools`; `pin = "strict"`; `block_injection = true` | `mcp.allow_tools`, `args`, weaker `pin`, `block_injection = false` |
+| `limits` and `approval.timeout` that are lower than the current value | higher limits, `approval.transport`, `[audit]`, `[override]`, `sandbox.backend`, `allow_degraded = true` |
+
+Every ignored setting is named in one warning at startup and recorded in
+the session log (`project_trust`).
+
+```sh
+agentkeep policy trust [FILE]    # trust this exact content; prints what it loosens
+agentkeep policy untrust [FILE]
+agentkeep run --trust-project -- <cmd>   # trust for one run (CI)
+```
+
+Trust is stored per absolute path and SHA-256 in
+`~/.config/agentkeep/trusted.toml` (mode `0600`). Editing the file revokes
+it. `agentkeep policy init` trusts the file it writes. A file named
+explicitly with `--policy` is treated as trusted. Your global file is
+always trusted. The trust store and the audit directory are never
+visible inside a sandbox.
+
 ## `[override]`
 
-Project file only. Ignored, with a warning, anywhere else or without
+Project file only, and only when the file is trusted. Ignored, with a warning, anywhere else or without
 `acknowledge = true`.
 
 | Key | Meaning |
@@ -145,5 +176,7 @@ agentkeep policy init              # interactive; --defaults writes the template
 agentkeep policy show              # effective policy with sources and warnings
 agentkeep policy show --defaults   # the compiled-in defaults
 agentkeep policy check [FILE]      # validate; non-zero exit on error
+agentkeep policy trust [FILE]      # apply a project file in full (see above)
+agentkeep policy untrust [FILE]
 agentkeep doctor                   # which backend works here and what it can enforce
 ```

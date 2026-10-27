@@ -30,7 +30,9 @@ agentkeep report --format md            # summarise a session
 
 Lives at the project root, merged over `~/.config/agentkeep/agentkeep.toml`
 and the built-in defaults. Lower-priority files cannot remove `deny` or
-`hidden` rules.
+`hidden` rules. A project file that came with the repository only tightens
+until the user runs `agentkeep policy trust`; never run that on the user's
+behalf, show them what the file loosens and let them decide.
 
 ```toml
 schema = 1

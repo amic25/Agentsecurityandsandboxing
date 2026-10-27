@@ -28,6 +28,9 @@ read_write = []
 # Hidden even if a parent is made visible. The home directory itself is not
 # mounted at all; this list is a second layer for paths users bind on purpose.
 hidden = [
+  # agentkeep's own state: the trust store, global policy and audit logs.
+  "~/.config/agentkeep",
+  "~/.local/share/agentkeep",
   "~/.ssh",
   "~/.aws",
   "~/.azure",

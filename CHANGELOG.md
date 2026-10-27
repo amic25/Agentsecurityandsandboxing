@@ -18,6 +18,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 - Proxy: `net.request` events claimed `inspected: true` when DLP was
   disabled; the field now says whether the request was actually scanned,
   and a new `tunnel` field says whether it came through `CONNECT`.
+- Policy: a project's `agentkeep.toml` arrives with the repository, so it
+  could widen what the sandbox exposes (S1). An untrusted project file now
+  contributes only tightening settings; everything else is named in one
+  startup warning and in the session log. `agentkeep policy trust|untrust`
+  record trust per path and SHA-256 (editing the file revokes it),
+  `--trust-project` trusts for one run, and `policy init` trusts the file
+  it writes.
+- Sandbox: the trust store and the audit directory are hidden in every
+  plan, so the agent can neither trust its own policy nor rewrite its log.
+- Proxy: link-local and cloud metadata addresses are refused even with
+  `allow_private = true` (N5). The TLS SNI must match the `CONNECT` host
+  and a request's `Host` header must match its destination (N8).
+- Sandbox: seccomp refuses the `TIOCSTI` and `TIOCLINUX` ioctls, which can
+  type commands into the user's terminal (C7).
+- Approvals: in-sandbox shims and `agentkeep approve` clients use separate
+  sockets, so the agent cannot answer its own prompt; prompt text is shown
+  with control and bidi characters escaped (C8).
+- Audit: the session directory is `0700` and the log `0600` (L-A1), and every
+  logged string passes through the DLP detectors, so secrets appear as
+  `[REDACTED:<detector>]` (L-A3).
 
 ### Added
 

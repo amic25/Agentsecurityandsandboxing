@@ -20,6 +20,8 @@ pub fn run(globals: &Globals, cmd: PolicyCommand) -> Result<ExitCode> {
         PolicyCommand::Init { defaults } => init(defaults),
         PolicyCommand::Show { defaults } => show(globals, defaults),
         PolicyCommand::Check { file } => check(globals, file.as_deref()),
+        PolicyCommand::Trust { file } => trust(file.as_deref(), true),
+        PolicyCommand::Untrust { file } => trust(file.as_deref(), false),
     }
 }
 
@@ -90,8 +92,16 @@ fn init(defaults: bool) -> Result<ExitCode> {
         },
     )
     .map_err(|e| anyhow::anyhow!("generated policy is invalid: {e}"))?;
-    std::fs::write(path, text).with_context(|| format!("write {}", path.display()))?;
-    eprintln!("wrote {}", path.display());
+    std::fs::write(path, &text).with_context(|| format!("write {}", path.display()))?;
+    // The user just wrote this file themselves, so it is trusted as written.
+    let mut store = agentkeep_policy::trust::TrustStore::load(&load::trust_store_path(&host))
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    store.trust(&host.cwd.join(path), text.as_bytes());
+    store.save().map_err(|e| anyhow::anyhow!("{e}"))?;
+    eprintln!(
+        "wrote {} (trusted; editing it revokes trust until `agentkeep policy trust`)",
+        path.display()
+    );
     Ok(ExitCode::SUCCESS)
 }
 
@@ -110,8 +120,69 @@ fn show(globals: &Globals, defaults: bool) -> Result<ExitCode> {
         println!("# WARNING ({}): {}", w.source, w.message);
     }
     println!("# project = {}", loaded.policy.project.display());
+    if let Some(t) = &loaded.project_trust {
+        match t.trusted_by {
+            Some(how) => println!("# {}: applies in full ({how})", t.path.display()),
+            None => println!(
+                "# {}: NOT TRUSTED; only tightening settings apply; ignored: {}",
+                t.path.display(),
+                if t.ignored.is_empty() {
+                    "nothing".to_string()
+                } else {
+                    t.ignored.join(", ")
+                }
+            ),
+        }
+    }
     println!();
     print!("{}", toml::to_string_pretty(&loaded.merged)?);
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `agentkeep policy trust | untrust`.
+fn trust(file: Option<&Path>, grant: bool) -> Result<ExitCode> {
+    let host = Host::detect()?;
+    let path = match file {
+        Some(p) => p.to_path_buf(),
+        None => agentkeep_policy::discover::find_project_file(&host.cwd)
+            .context("no agentkeep.toml in this project (searched up to the git root)")?,
+    };
+    let store_path = load::trust_store_path(&host);
+    let mut store = agentkeep_policy::trust::TrustStore::load(&store_path)
+        .map_err(|e| anyhow::anyhow!("{e}"))?;
+    if !grant {
+        let was = store.untrust(&path);
+        store.save().map_err(|e| anyhow::anyhow!("{e}"))?;
+        println!(
+            "{}: {}",
+            path.display(),
+            if was {
+                "no longer trusted"
+            } else {
+                "was not trusted"
+            }
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
+    let bytes = std::fs::read(&path).with_context(|| format!("read {}", path.display()))?;
+    let text = std::str::from_utf8(&bytes).context("policy file is not valid UTF-8")?;
+    let file = agentkeep_policy::parse_str(text, &path.display().to_string())?;
+    let lower = [agentkeep_policy::discover::defaults_layer()];
+    let (current, _) = merge(&lower);
+    let (_, loosening) = agentkeep_policy::trust::restrict_untrusted(&file, &current);
+    store.trust(&path, &bytes);
+    store.save().map_err(|e| anyhow::anyhow!("{e}"))?;
+    println!(
+        "{}: trusted (sha256 {})",
+        path.display(),
+        agentkeep_policy::trust::digest(&bytes)
+    );
+    if loosening.is_empty() {
+        println!("  it only tightens the policy, so trusting it changes nothing");
+    } else {
+        println!("  these settings now apply: {}", loosening.join(", "));
+    }
+    println!("  editing the file revokes this; `agentkeep policy untrust` removes it");
     Ok(ExitCode::SUCCESS)
 }
 

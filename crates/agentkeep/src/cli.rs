@@ -140,6 +140,12 @@ pub struct RunArgs {
     #[arg(long = "allow-domain", value_name = "HOST")]
     pub allow_domains: Vec<String>,
 
+    /// Apply the project's agentkeep.toml in full for this run even if it
+    /// has not been trusted with `agentkeep policy trust`. For CI, where the
+    /// repository is trusted by construction.
+    #[arg(long)]
+    pub trust_project: bool,
+
     /// The agent command to run, after `--`.
     #[arg(required = true, last = true, value_name = "COMMAND")]
     pub command: Vec<String>,
@@ -188,6 +194,17 @@ pub enum PolicyCommand {
     /// Validate a policy file and report every problem with line numbers.
     Check {
         /// File to check. Defaults to the discovered policy.
+        file: Option<PathBuf>,
+    },
+    /// Trust the current content of a project policy file so that settings
+    /// loosening the sandbox apply. Editing the file revokes the trust.
+    Trust {
+        /// Policy file. Defaults to the project's agentkeep.toml.
+        file: Option<PathBuf>,
+    },
+    /// Stop trusting a project policy file.
+    Untrust {
+        /// Policy file. Defaults to the project's agentkeep.toml.
         file: Option<PathBuf>,
     },
 }

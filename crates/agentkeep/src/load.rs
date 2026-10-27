@@ -4,10 +4,13 @@
 use std::path::{Path, PathBuf};
 
 use agentkeep_policy::decide::Compiled;
-use agentkeep_policy::discover::{project_root, standard_layers};
+use agentkeep_policy::discover::{
+    defaults_layer, find_project_file, global_file, load_file, project_root,
+};
 use agentkeep_policy::merge::{merge, Layer, Source, Warning};
 use agentkeep_policy::resolved::{Context, Policy};
 use agentkeep_policy::schema::{FilesystemSection, NetworkSection, PolicyFile, SandboxSection};
+use agentkeep_policy::trust::{restrict_untrusted, TrustStore, STORE_FILE_NAME};
 use anyhow::{bail, Context as _, Result};
 
 use crate::cli::{Globals, RunArgs};
@@ -24,6 +27,25 @@ pub struct Loaded {
     pub warnings: Vec<Warning>,
     /// Where layers came from, for the audit log.
     pub sources: Vec<String>,
+    /// Trust status of the project policy file, when there is one.
+    pub project_trust: Option<ProjectTrust>,
+}
+
+/// Whether the project policy file applied in full, and if not, what was
+/// ignored (threat model S1).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct ProjectTrust {
+    /// The project policy file.
+    pub path: PathBuf,
+    /// Why it applies in full, or `None` when only its tightening settings did.
+    pub trusted_by: Option<&'static str>,
+    /// Loosening settings that were ignored because the file is untrusted.
+    pub ignored: Vec<String>,
+}
+
+/// The trust store, next to the global policy file.
+pub fn trust_store_path(host: &Host) -> PathBuf {
+    global_file(&host.home, host.xdg_config_home.as_deref()).with_file_name(STORE_FILE_NAME)
 }
 
 /// Host environment facts needed to resolve a policy.
@@ -94,13 +116,38 @@ fn cli_layer(args: Option<&RunArgs>) -> Option<Layer> {
 
 /// Load, merge, resolve and compile.
 pub fn load(globals: &Globals, host: &Host, run_args: Option<&RunArgs>) -> Result<Loaded> {
-    let mut layers = standard_layers(
-        &host.home,
-        host.xdg_config_home.as_deref(),
-        &host.cwd,
-        globals.policy.as_deref(),
-    )
-    .map_err(|e| anyhow::anyhow!("{e}"))?;
+    let mut layers = vec![defaults_layer()];
+    let global = global_file(&host.home, host.xdg_config_home.as_deref());
+    if global.is_file() {
+        layers.push(
+            load_file(&global, Source::Global(global.clone()))
+                .map_err(|e| anyhow::anyhow!("{e}"))?,
+        );
+    }
+    let mut extra_warnings = Vec::new();
+    let project_trust = match globals
+        .policy
+        .clone()
+        .or_else(|| find_project_file(&host.cwd))
+    {
+        Some(path) => {
+            let named = globals.policy.is_some();
+            let trust_flag = run_args.is_some_and(|a| a.trust_project);
+            let (layer, trust) = project_layer(&path, host, &layers, named, trust_flag)?;
+            if trust.trusted_by.is_none() && !trust.ignored.is_empty() {
+                extra_warnings.push(Warning {
+                    source: layer.source.clone(),
+                    message: format!(
+                        "this project policy is not trusted, so settings that would loosen the sandbox were ignored: {}. Review the file, then run `agentkeep policy trust` (or pass --trust-project for one run)",
+                        trust.ignored.join(", ")
+                    ),
+                });
+            }
+            layers.push(layer);
+            Some(trust)
+        }
+        None => None,
+    };
     if let Some(args) = run_args {
         if args.preset.is_some() {
             bail!("agent presets land in Phase 5; use [network] allow and [filesystem] read_write in agentkeep.toml for now");
@@ -110,7 +157,8 @@ pub fn load(globals: &Globals, host: &Host, run_args: Option<&RunArgs>) -> Resul
         layers.push(cli);
     }
     let sources: Vec<String> = layers.iter().map(|l| l.source.to_string()).collect();
-    let (merged, warnings) = merge(&layers);
+    let (merged, mut warnings) = merge(&layers);
+    warnings.extend(extra_warnings);
     // A relative or default `project` means "this project": the git root of
     // the current directory, or the directory itself.
     let base_dir = project_root(&host.cwd);
@@ -127,7 +175,59 @@ pub fn load(globals: &Globals, host: &Host, run_args: Option<&RunArgs>) -> Resul
         compiled,
         warnings,
         sources,
+        project_trust,
     })
+}
+
+/// Read the project policy once, decide whether it is trusted, and restrict
+/// it to its tightening settings when it is not. Reading the bytes once and
+/// parsing those same bytes means the trusted content is the content used.
+fn project_layer(
+    path: &Path,
+    host: &Host,
+    lower: &[Layer],
+    named: bool,
+    trust_flag: bool,
+) -> Result<(Layer, ProjectTrust)> {
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
+    let text = std::str::from_utf8(&bytes)
+        .with_context(|| format!("{} is not valid UTF-8", path.display()))?;
+    let file = agentkeep_policy::parse_str(text, &path.display().to_string())?;
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        host.cwd.join(path)
+    };
+    let trusted_by = if named {
+        Some("named with --policy")
+    } else if trust_flag {
+        Some("--trust-project")
+    } else {
+        let store =
+            TrustStore::load(&trust_store_path(host)).map_err(|e| anyhow::anyhow!("{e}"))?;
+        store
+            .is_trusted(&abs, &bytes)
+            .then_some("trusted with `agentkeep policy trust`")
+    };
+    let (file, ignored) = if trusted_by.is_some() {
+        (file, Vec::new())
+    } else {
+        let (current, _) = merge(lower);
+        restrict_untrusted(&file, &current)
+    };
+    let layer = Layer {
+        source: Source::Project(abs.clone()),
+        base_dir: abs.parent().map(Path::to_path_buf),
+        file,
+    };
+    Ok((
+        layer,
+        ProjectTrust {
+            path: abs,
+            trusted_by,
+            ignored,
+        },
+    ))
 }
 
 fn check_project(project: &Path, home: &Path) -> Result<()> {

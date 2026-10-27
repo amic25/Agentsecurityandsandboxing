@@ -26,7 +26,7 @@ code we ask users to trust. Rules:
 | `seccompiler` | `agentkeep-sandbox` (Linux) | Pure-Rust BPF compiler for seccomp filters, from the Firecracker project; no libseccomp C dependency, so the binary stays static | `libseccomp` (C): widely used but breaks the single-static-binary goal |
 | `serde` (derive) | policy, sandbox, audit | Schema definitions double as documentation; derive keeps them in one place | Hand-written parsers: far more code for the same guarantees |
 | `serde_json` | sandbox (plan IPC), audit (JSONL), CLI (approval protocol) | Canonical key ordering (no `preserve_order`) makes the audit hash chain deterministic | Alternatives are smaller but less battle-tested |
-| `sha2` | `agentkeep-audit` | SHA-256 for the audit hash chain; RustCrypto, pure Rust, widely audited | `ring`: brings a C/asm build; overkill for a hash |
+| `sha2` | `agentkeep-audit`, `agentkeep-policy` | SHA-256 for the audit hash chain and the project-policy trust store; RustCrypto, pure Rust, widely audited | `ring`: brings a C/asm build; overkill for a hash |
 | `tempfile` | sandbox (plan file), CLI (session scratch dir) | Secure temp files and directories with automatic cleanup and O_TMPFILE where available | `std` only: would need to reimplement safe unique naming |
 | `thiserror` | all library crates | Typed error enums with derived `Display` and `source` | Manual `impl Error`: boilerplate without benefit |
 | `toml` | policy, CLI | The policy file format; version 1.x reports spans for line/column errors | `toml_edit`: needed only if we rewrote files preserving comments (`policy init` writes from a template instead) |

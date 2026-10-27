@@ -78,13 +78,15 @@ four exit with status 70.
   for well-known names (`ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GH_TOKEN`,
   ...). Any other name without a `dlp.allow_provider_keys_to` entry may be
   sent to any allowed host.
-- The project's `agentkeep.toml` (untrusted when the repository is, threat
-  S1) can set `network.tls_inspect = false`, `network.allow_private = true`,
-  `network.trusted_cas`, `dlp.enabled = false`, `dlp.report_only` and
-  `env.pass` (which passes a host variable into the sandbox) without an
-  `[override]` acknowledgement or a warning. Review a cloned repository's
-  policy file before running in it. Found while writing the network escape
-  tests, which use exactly this to configure their local origins.
+- A project's `agentkeep.toml` applies in full only after `agentkeep
+  policy trust` (or with `run --trust-project`, or when named with
+  `--policy`). Trust is a decision about file content: `agentkeep policy
+  trust` lists what the file loosens, but the user still has to read it.
+  An untrusted file's tightening settings (hidden paths, deny and ask
+  lists, block values, lower limits) always apply.
+- The trust store and the audit directory are hidden in every sandbox,
+  but a *trusted* policy can still expose other agentkeep-relevant paths
+  (for example the agent's own configuration directory) read-write.
 - Audit-log redaction (`audit.redact`, on by default) replaces what the
   DLP detectors recognise: known credential formats, `dlp.block_values`
   and secrets passed with `env.pass`. A secret in a format no detector
