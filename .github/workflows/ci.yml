@@ -132,11 +132,9 @@ jobs:
           RUNTIME: ${{ matrix.runtime }}
         run: '"$RUNTIME" info'
       - name: Keep rootless runtime state in the real home
-        # The escape harness gives every test a fake HOME; without these,
+        # The escape harness gives every test a fake HOME; without this,
         # rootless Podman would create fresh storage inside each one.
-        run: |
-          echo "XDG_DATA_HOME=$HOME/.local/share" >> "$GITHUB_ENV"
-          echo "XDG_CONFIG_HOME=$HOME/.config" >> "$GITHUB_ENV"
+        run: echo "XDG_DATA_HOME=$HOME/.local/share" >> "$GITHUB_ENV"
       - run: cargo build --workspace --locked
       - name: Escape suite against the container backend
         env:

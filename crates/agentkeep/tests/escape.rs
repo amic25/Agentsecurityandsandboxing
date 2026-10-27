@@ -58,7 +58,6 @@ mod suite {
         "DOCKER_CONTEXT",
         "XDG_RUNTIME_DIR",
         "XDG_DATA_HOME",
-        "XDG_CONFIG_HOME",
     ];
 
     fn bin() -> &'static str {
@@ -205,6 +204,14 @@ mod suite {
 
         /// Write the project policy and, when `trust` is set, trust it the
         /// way a user would after reviewing it.
+        /// Set explicitly rather than forwarded: CI runners export their
+        /// own, and agentkeep keeps its global policy and trust store there,
+        /// so every test needs a private one that `policy trust` and `run`
+        /// agree on.
+        fn config_home(&self) -> PathBuf {
+            self.home.join(".config")
+        }
+
         fn write_policy(&self, extra_policy: &str, trust: bool) {
             let file = self.project.join("agentkeep.toml");
             if extra_policy.is_empty() {
@@ -219,6 +226,7 @@ mod suite {
                     .current_dir(&self.project)
                     .env_clear()
                     .env("HOME", &self.home)
+                    .env("XDG_CONFIG_HOME", self.config_home())
                     .env("PATH", std::env::var("PATH").unwrap_or_default())
                     .output()
                     .expect("agentkeep policy trust");
@@ -253,10 +261,15 @@ mod suite {
                 .current_dir(&self.project)
                 .env_clear()
                 .env("HOME", &self.home)
+                .env("XDG_CONFIG_HOME", self.config_home())
                 .env("PATH", std::env::var("PATH").unwrap_or_default())
                 .env("USER", "escapetester")
                 .env("FAKE_SECRET_TOKEN", FAKE_ENV_SECRET)
                 .env("LD_PRELOAD", "/nonexistent/evil.so")
+                .env("LD_LIBRARY_PATH", "/nonexistent/lib")
+                .env("DYLD_INSERT_LIBRARIES", "/nonexistent/evil.dylib")
+                .env("PYTHONPATH", "/nonexistent/py")
+                .env("NODE_OPTIONS", "--require=/nonexistent/evil.js")
                 .env("TERM", "dumb");
             // The container backend's runtime CLI runs on the host side and
             // needs its own configuration (which runtime, where the daemon
@@ -682,7 +695,7 @@ print("pvr", r, os.strerror(ctypes.get_errno()))
         let Some(h) = harness("E2") else { return };
         let o = h.run(
             "",
-            "env | grep -E '^(LD_PRELOAD|LD_LIBRARY_PATH)=' ; echo grep-rc=$?",
+            "env | grep -E '^(LD_PRELOAD|LD_LIBRARY_PATH|DYLD_[A-Z_]*|PYTHONPATH|NODE_OPTIONS)=' ; echo grep-rc=$?",
         );
         assert!(out(&o).contains("grep-rc=1"), "{}", out(&o));
     }
