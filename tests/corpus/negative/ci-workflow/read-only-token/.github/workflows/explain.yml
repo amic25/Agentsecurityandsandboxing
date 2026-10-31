@@ -1,0 +1,11 @@
+name: explain
+on:
+  issue_comment:
+    types: [created]
+permissions:
+  contents: read
+jobs:
+  explain:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: anthropics/claude-code-action@v1

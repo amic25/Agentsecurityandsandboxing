@@ -17,14 +17,18 @@
 //! - [`walk`]: file discovery under a scan root.
 //! - [`engine`]: [`Scanner`], which ties rules and files together.
 //! - [`report`]: [`Finding`], [`Report`] and fingerprints.
+//! - [`output`]: text, `agentkeep.scan/1` JSON and SARIF 2.1.0 renderers.
 //! - [`builtin`]: the rule set compiled into the binary from `rules/`.
+//! - [`corpus`]: precision and recall of the rules over a labelled corpus.
 
 #![forbid(unsafe_code)]
 #![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used, clippy::panic))]
 
 pub mod builtin;
+pub mod corpus;
 mod detect;
 pub mod engine;
+pub mod output;
 pub mod report;
 pub mod rule;
 mod text;

@@ -1,0 +1,7 @@
+schema = 1
+
+[filesystem]
+read_write = ["~"]
+
+[sandbox]
+allow_degraded = true

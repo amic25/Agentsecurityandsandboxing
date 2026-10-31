@@ -11,6 +11,7 @@ cargo-fuzz = true
 libfuzzer-sys = "0.4"
 agentkeep-policy = { path = "../crates/agentkeep-policy" }
 agentkeep-proxy = { path = "../crates/agentkeep-proxy" }
+agentkeep-scan = { path = "../crates/agentkeep-scan" }
 
 # Keep the fuzz crate out of the main workspace: it needs nightly.
 [workspace]
@@ -26,6 +27,13 @@ bench = false
 [[bin]]
 name = "proxy_inputs"
 path = "fuzz_targets/proxy_inputs.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scan_inputs"
+path = "fuzz_targets/scan_inputs.rs"
 test = false
 doc = false
 bench = false

@@ -1,0 +1,8 @@
+name: triage
+on: pull_request_target
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - run: |
+          npx -y @openai/codex exec "Label this PR: ${{ github.event.pull_request.title }}"

@@ -1,12 +1,14 @@
 //! Property tests: whatever the input, scanning never panics, every
 //! finding's range lies inside the input on character boundaries, and
-//! snippets and messages are safe to print.
+//! snippets and messages are safe to print. The renderers turn any such
+//! scan into valid JSON and SARIF and into text without control characters.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use std::sync::OnceLock;
 
-use agentkeep_scan::Scanner;
+use agentkeep_scan::output::{json, sarif, text};
+use agentkeep_scan::{Report, Scanner};
 use proptest::prelude::*;
 
 fn scanner() -> &'static Scanner {
@@ -163,6 +165,43 @@ fn check(path: &str, text: &str) {
     }
 }
 
+/// Render one scanned text in every format and check the documents.
+fn check_outputs(path: &str, input: &str) {
+    let findings = scanner().scan_text(path, input);
+    let n = findings.len();
+    let report = Report {
+        root: "repo".into(),
+        root_dir: "/srv/repo".into(),
+        findings,
+        files_scanned: 1,
+        ..Report::default()
+    };
+    let doc: serde_json::Value = serde_json::from_str(&json::render(&report).unwrap()).unwrap();
+    assert_eq!(doc["findings"].as_array().unwrap().len(), n);
+    assert_eq!(doc["summary"]["findings"], n);
+
+    let rules = scanner().rules();
+    let log: serde_json::Value =
+        serde_json::from_str(&sarif::render(&report, rules).unwrap()).unwrap();
+    let results = log["runs"][0]["results"].as_array().unwrap();
+    assert_eq!(results.len(), n);
+    for r in results {
+        let idx = usize::try_from(r["ruleIndex"].as_u64().unwrap()).unwrap();
+        assert_eq!(rules[idx].id(), r["ruleId"].as_str().unwrap());
+        let uri = r["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            .as_str()
+            .unwrap();
+        assert!(uri.bytes().all(|b| b.is_ascii_graphic()), "{uri}");
+    }
+
+    let out = text::render(&report, rules, false);
+    let unsafe_char = |c: char| {
+        (c.is_control() && c != '\n' && c != '\t')
+            || matches!(c, '\u{202A}'..='\u{202E}' | '\u{2066}'..='\u{2069}' | '\u{E0000}'..='\u{E007F}')
+    };
+    assert!(!out.chars().any(unsafe_char), "{out:?}");
+}
+
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(512))]
 
@@ -177,5 +216,21 @@ proptest! {
         path in prop::sample::select(PATHS),
     ) {
         check(path, &text_from(&parts));
+    }
+
+    #[test]
+    fn every_scan_renders_in_every_format(
+        parts in prop::collection::vec(any::<usize>(), 0..80),
+        path in prop::sample::select(PATHS),
+    ) {
+        check_outputs(path, &text_from(&parts));
+    }
+
+    #[test]
+    fn hostile_paths_render_safely(
+        name in "[a-z\\x00-\\x1f\\u{202E}\\u{E0041} %#?]{1,12}",
+        parts in prop::collection::vec(any::<usize>(), 0..40),
+    ) {
+        check_outputs(&format!("{name}.md"), &text_from(&parts));
     }
 }

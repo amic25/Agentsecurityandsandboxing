@@ -14,9 +14,15 @@ Targets:
   chunks of every size (a secret blocked as one buffer must also be blocked
   when streamed), the redaction of logged samples, and destination parsing
   and matching (`split_host_port`, `pattern_matches`, `is_non_public`).
+- `scan_inputs`: arbitrary bytes as a file under `x.md`,
+  `.github/workflows/x.yml`, `.mcp.json`, `.codex/config.toml` and
+  `agentkeep.toml` through the scanner with the built-in rules (finding
+  ranges must stay inside the input, and the result must render as text,
+  JSON and SARIF), and as a rule YAML file through the rule loader and its
+  inline examples.
 
-Planned: `proxy_http` (the HTTP/CONNECT request path), `scan_rules`
-(Phase 3), `mcp_frame` (Phase 4).
+Planned: `proxy_http` (the HTTP/CONNECT request path), `mcp_frame`
+(Phase 4).
 
 Without nightly, `cargo check --manifest-path fuzz/Cargo.toml --bins`
 type-checks the targets on stable. Coverage-guided runs also work on

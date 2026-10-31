@@ -1,0 +1,11 @@
+name: answer
+on: [discussion]
+permissions: write-all
+jobs:
+  answer:
+    runs-on: ubuntu-latest
+    env:
+      QUESTION: ${{ github.event.discussion.body }}
+    steps:
+      - run: |
+          claude -p "Answer this question: $QUESTION"

@@ -226,6 +226,9 @@ pub struct McpGatewayArgs {
 }
 
 /// Arguments for `agentkeep scan`.
+///
+/// Exit status: 0 when no finding is at or above `--fail-on`, 1 when one
+/// is, 2 on a usage error, an unreadable root or a bad rule file.
 #[derive(Debug, Args)]
 pub struct ScanArgs {
     /// Directory or file to scan. Defaults to the current directory.
@@ -236,13 +239,57 @@ pub struct ScanArgs {
     #[arg(long, value_enum, default_value_t = ScanFormat::Text)]
     pub format: ScanFormat,
 
-    /// Exit non-zero when a finding at or above this severity exists.
+    /// Exit 1 when a finding at or above this severity exists.
     #[arg(long, value_enum, default_value_t = Severity::High)]
     pub fail_on: Severity,
 
-    /// Additional rule directories to load.
+    /// Additional rule directory to load next to the built-in rules
+    /// (repeatable). Rule files are `<category>/<slug>.yaml`.
     #[arg(long = "rules", value_name = "DIR")]
     pub rule_dirs: Vec<PathBuf>,
+
+    /// Write the report to FILE instead of stdout.
+    #[arg(short, long, value_name = "FILE")]
+    pub output: Option<PathBuf>,
+
+    /// Skip files larger than SIZE: bytes, or with a K or M suffix
+    /// (powers of 1024), at most 256M.
+    #[arg(long, value_name = "SIZE", default_value = "1M", value_parser = parse_size)]
+    pub max_file_size: u64,
+
+    /// Print every loaded rule (id, severity, title) and exit.
+    #[arg(long, conflicts_with = "test_rules")]
+    pub list_rules: bool,
+
+    /// Run the inline examples of every loaded rule (built-in, --rules and
+    /// the DIRs given here) and exit 1 if any example fails.
+    #[arg(long, value_name = "DIR", num_args = 0..)]
+    pub test_rules: Option<Vec<PathBuf>>,
+}
+
+/// The largest `--max-file-size`: the scanner holds a file in memory while
+/// every rule looks at it.
+pub const MAX_FILE_SIZE_LIMIT: u64 = 256 * 1024 * 1024;
+
+/// Parse `--max-file-size`: `4096`, `512K`, `512KiB`, `2M`, `2MB`.
+pub fn parse_size(s: &str) -> Result<u64, String> {
+    let t = s.trim();
+    let split = t.find(|c: char| !c.is_ascii_digit()).unwrap_or(t.len());
+    let (digits, unit) = t.split_at(split);
+    let number: u64 = digits
+        .parse()
+        .map_err(|_| format!("`{s}` is not a size (examples: 65536, 512K, 2M)"))?;
+    let scale: u64 = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "b" => 1,
+        "k" | "kb" | "kib" => 1024,
+        "m" | "mb" | "mib" => 1024 * 1024,
+        other => return Err(format!("unknown size unit `{other}` (use K or M)")),
+    };
+    let bytes = number
+        .checked_mul(scale)
+        .filter(|b| (1..=MAX_FILE_SIZE_LIMIT).contains(b))
+        .ok_or_else(|| format!("`{s}` must be between 1 byte and 256M"))?;
+    Ok(bytes)
 }
 
 /// Scanner output formats.
@@ -352,6 +399,74 @@ mod tests {
         match cli.map(|c| c.command) {
             Some(Command::Run(args)) => assert_eq!(args.command, vec!["claude", "--help"]),
             other => panic!("unexpected parse result: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn scan_arguments() {
+        let parse = |args: &[&str]| match Cli::try_parse_from(args).map(|c| c.command) {
+            Ok(Command::Scan(a)) => Ok(a),
+            Ok(other) => panic!("unexpected command {other:?}"),
+            Err(e) => Err(e),
+        };
+        let a = parse(&["agentkeep", "scan"]).unwrap();
+        assert_eq!(a.path, PathBuf::from("."));
+        assert_eq!(a.max_file_size, 1024 * 1024);
+        assert!(a.test_rules.is_none() && !a.list_rules && a.output.is_none());
+        let a = parse(&[
+            "agentkeep",
+            "scan",
+            "repo",
+            "--rules",
+            "r1",
+            "--rules",
+            "r2",
+            "-o",
+            "out.sarif",
+            "--max-file-size",
+            "64k",
+            "--format",
+            "sarif",
+            "--fail-on",
+            "critical",
+        ])
+        .unwrap();
+        assert_eq!(a.rule_dirs, vec![PathBuf::from("r1"), PathBuf::from("r2")]);
+        assert_eq!(a.output, Some(PathBuf::from("out.sarif")));
+        assert_eq!(a.max_file_size, 64 * 1024);
+        assert!(matches!(a.format, ScanFormat::Sarif));
+        assert!(matches!(a.fail_on, Severity::Critical));
+        let a = parse(&["agentkeep", "scan", "--test-rules"]).unwrap();
+        assert_eq!(a.test_rules, Some(vec![]));
+        let a = parse(&["agentkeep", "scan", "--test-rules", "a", "b"]).unwrap();
+        assert_eq!(
+            a.test_rules,
+            Some(vec![PathBuf::from("a"), PathBuf::from("b")])
+        );
+        assert!(parse(&["agentkeep", "scan", "--list-rules", "--test-rules"]).is_err());
+        assert!(parse(&["agentkeep", "scan", "--format", "xml"]).is_err());
+        assert!(parse(&["agentkeep", "scan", "--fail-on", "severe"]).is_err());
+    }
+
+    #[test]
+    fn sizes() {
+        assert_eq!(parse_size("4096"), Ok(4096));
+        assert_eq!(parse_size("512K"), Ok(512 * 1024));
+        assert_eq!(parse_size("512kib"), Ok(512 * 1024));
+        assert_eq!(parse_size("2M"), Ok(2 * 1024 * 1024));
+        assert_eq!(parse_size(" 2 MB "), Ok(2 * 1024 * 1024));
+        assert_eq!(parse_size("256M"), Ok(MAX_FILE_SIZE_LIMIT));
+        for bad in [
+            "",
+            "0",
+            "257M",
+            "1G",
+            "-1",
+            "1.5M",
+            "M",
+            "99999999999999999999",
+        ] {
+            assert!(parse_size(bad).is_err(), "{bad}");
         }
     }
 

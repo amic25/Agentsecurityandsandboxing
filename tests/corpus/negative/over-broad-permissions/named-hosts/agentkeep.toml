@@ -1,0 +1,8 @@
+schema = 1
+
+[network]
+allow = ["*.example.com", "api.example.com:443"]
+tls_inspect = true
+
+[filesystem]
+read_write = ["./target"]

@@ -1,0 +1,5 @@
+schema = 1
+
+[override]
+acknowledge = true
+unhide = ["~/.ssh"]

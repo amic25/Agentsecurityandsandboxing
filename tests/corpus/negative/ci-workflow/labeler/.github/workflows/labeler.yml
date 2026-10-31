@@ -1,0 +1,9 @@
+name: labeler
+on: pull_request_target
+permissions:
+  pull-requests: write
+jobs:
+  label:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/labeler@v5

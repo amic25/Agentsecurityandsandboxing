@@ -1,0 +1,4 @@
+# Corpus fixtures are byte-exact: line endings and invisible characters are
+# part of what the scanner is measured on, so git must not convert them
+# (Windows runners check out with core.autocrlf=true).
+* -text

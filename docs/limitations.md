@@ -454,6 +454,15 @@ non-blocking experiment and is otherwise untested.
 - `exfiltration/markdown-image-beacon` allowlists common badge hosts. Their
   dynamic-badge endpoints (for example `img.shields.io/endpoint?url=`) fetch
   other URLs, and those are not inspected.
+- `agentkeep scan --output FILE` refuses to write when `FILE` itself is a
+  symlink and replaces the file by renaming a temporary file over it, but
+  symlinks in the directories leading to `FILE` are followed. Point
+  `--output` outside the scanned checkout, or at a path whose parent
+  directories you control.
+- SARIF snippets carry the same escaped text as the other formats
+  (`\u{202E}` instead of the raw character), not the file's bytes, so a
+  consumer that compares snippets with the file sees a difference on lines
+  with invisible characters.
 
 ## MCP gateway
 

@@ -1,0 +1,7 @@
+name: setup
+on: push
+jobs:
+  setup:
+    runs-on: ubuntu-latest
+    steps:
+      - run: curl -sSL https://install.example/tool.sh | bash

@@ -5,6 +5,7 @@
 
 use std::fmt::{self, Write as _};
 use std::ops::Range;
+use std::path::PathBuf;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -221,6 +222,11 @@ pub struct Summary {
 pub struct Report {
     /// The scan root as given.
     pub root: String,
+    /// The directory finding paths are relative to: the root itself, or its
+    /// parent when the root is a single file. SARIF needs it to anchor
+    /// `%SRCROOT%`; it is not part of the JSON report.
+    #[serde(skip)]
+    pub root_dir: PathBuf,
     /// Findings, ordered by path (walk order), then position, then rule id.
     pub findings: Vec<Finding>,
     /// Paths not scanned.

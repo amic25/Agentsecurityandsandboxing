@@ -1,0 +1,13 @@
+name: gemini triage
+on:
+  issues:
+    types: [opened]
+permissions:
+  issues: write
+jobs:
+  triage:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: google-github-actions/run-gemini-cli@v0
+        with:
+          prompt: "Triage this issue: ${{ github.event.issue.body }}"

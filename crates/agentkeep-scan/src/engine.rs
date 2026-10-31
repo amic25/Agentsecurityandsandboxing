@@ -64,6 +64,7 @@ impl Scanner {
         let walked = walk::walk(root, opts)?;
         let mut report = Report {
             root: root.display().to_string(),
+            root_dir: walked.root_dir,
             skipped: walked.skipped,
             errors: walked.errors,
             truncated: walked.truncated,

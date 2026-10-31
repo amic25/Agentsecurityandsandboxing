@@ -17,6 +17,7 @@ mod netwire;
 mod policy_cmd;
 #[cfg(unix)]
 mod run;
+mod scan;
 #[cfg(unix)]
 mod shim;
 mod ui;
@@ -107,6 +108,7 @@ fn dispatch(cli: Cli) -> anyhow::Result<ExitCode> {
             Ok(ExitCode::from(doctor::EXIT_NO_BACKEND))
         }
         Command::Policy(cmd) => policy_cmd::run(&globals, cmd),
+        Command::Scan(args) => scan::run(&args),
         Command::Doctor(args) => doctor::run(args.json),
         other => {
             ui::error(&format!(

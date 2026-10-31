@@ -1,0 +1,29 @@
+{
+  "overall": {
+    "precision": 1.0,
+    "recall": 1.0
+  },
+  "rules": {
+    "ci-workflow/agent-untrusted-trigger-write-token": {
+      "recall": 1.0
+    },
+    "exfiltration/markdown-image-beacon": {
+      "recall": 1.0
+    },
+    "hidden-unicode/tag-characters": {
+      "recall": 1.0
+    },
+    "hidden-unicode/trojan-source": {
+      "recall": 1.0
+    },
+    "over-broad-permissions/agentkeep-policy-loosening": {
+      "recall": 1.0
+    },
+    "risky-shell/base64-exec": {
+      "recall": 1.0
+    },
+    "risky-shell/curl-pipe-shell": {
+      "recall": 1.0
+    }
+  }
+}
