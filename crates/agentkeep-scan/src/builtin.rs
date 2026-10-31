@@ -52,6 +52,10 @@ mod tests {
             "hidden-unicode/tag-characters",
             "exfiltration/markdown-image-beacon",
             "risky-shell/curl-pipe-shell",
+            "hidden-unicode/trojan-source",
+            "risky-shell/base64-exec",
+            "ci-workflow/agent-untrusted-trigger-write-token",
+            "over-broad-permissions/agentkeep-policy-loosening",
         ] {
             assert!(rules.iter().any(|r| r.id() == id), "missing {id}");
         }

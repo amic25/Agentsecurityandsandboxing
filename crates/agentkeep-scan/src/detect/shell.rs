@@ -90,6 +90,16 @@ pub(crate) struct ShellDetector {
 }
 
 impl ShellDetector {
+    /// A detector for fixed command lists, for builtins that reuse the
+    /// pipeline analysis. Names are bare command names, as in a rule.
+    pub(crate) fn with_commands(from: &[&str], to: &[&str]) -> Self {
+        Self {
+            from: from.iter().map(|s| (*s).to_owned()).collect(),
+            to: to.iter().map(|s| (*s).to_owned()).collect(),
+            also: Vec::new(),
+        }
+    }
+
     pub(crate) fn detect(&self, text: &str) -> Vec<Match> {
         let mut hits: Vec<Match> = Vec::new();
         // Cheap prefilter; `\u00` keeps JSON-escaped command names in play.
@@ -570,6 +580,45 @@ impl Lexer<'_> {
             kind,
         });
     }
+}
+
+/// A command in a script, as [`stage_commands`] reports it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StageCommand {
+    /// The command name, normalised (`/usr/bin/curl` -> `curl`).
+    pub(crate) name: String,
+    /// The words after the command in its pipeline stage, quotes removed.
+    pub(crate) args: Vec<String>,
+    /// From the command word to the end of its stage.
+    pub(crate) range: Range<usize>,
+}
+
+/// The command of every pipeline stage in `script`, after wrappers such as
+/// `sudo` and `env X=Y`. Top level only: quoted strings and substitutions
+/// are not entered.
+pub(crate) fn stage_commands(script: &str) -> Vec<StageCommand> {
+    let lexed = lex(script);
+    let mut out = Vec::new();
+    for pipeline in pipelines(&lexed.toks) {
+        for stage in &pipeline {
+            let Some((word, name)) = command(stage) else {
+                continue;
+            };
+            let args = stage
+                .iter()
+                .skip_while(|w| !std::ptr::eq(**w, word))
+                .skip(1)
+                .map(|w| w.text.clone())
+                .collect();
+            let end = stage.last().map_or(word.end, |w| w.end);
+            out.push(StageCommand {
+                name,
+                args,
+                range: word.start..end,
+            });
+        }
+    }
+    out
 }
 
 /// Tokenize. Every scan for a closing quote stops at the end of its line,

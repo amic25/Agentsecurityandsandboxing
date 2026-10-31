@@ -1,0 +1,88 @@
+id: hidden-unicode/trojan-source
+severity: high
+title: Bidi control characters in source code (Trojan Source)
+description: >
+  Unicode bidi embedding, override and isolate controls change the order in
+  which a line is displayed without changing how a compiler or interpreter
+  reads it. Placed in comments and string literals they make code look
+  commented out, or a check look different, to the person reviewing it
+  (CVE-2021-42574). Source code has no use for them as raw characters;
+  unbalanced ones and overrides that reverse text are reported in markup too.
+applies_to:
+  - "*.rs"
+  - "*.c"
+  - "*.h"
+  - "*.cc"
+  - "*.cpp"
+  - "*.cxx"
+  - "*.hpp"
+  - "*.cs"
+  - "*.java"
+  - "*.kt"
+  - "*.kts"
+  - "*.scala"
+  - "*.swift"
+  - "*.go"
+  - "*.dart"
+  - "*.js"
+  - "*.mjs"
+  - "*.cjs"
+  - "*.jsx"
+  - "*.ts"
+  - "*.mts"
+  - "*.cts"
+  - "*.tsx"
+  - "*.php"
+  - "*.py"
+  - "*.pyi"
+  - "*.rb"
+  - "*.pl"
+  - "*.pm"
+  - "*.lua"
+  - "*.sql"
+  - "*.sh"
+  - "*.bash"
+  - "*.zsh"
+  - "*.ps1"
+  - "*.groovy"
+  - "*.gradle"
+  - "*.sol"
+  - "*.zig"
+  - "*.nix"
+  - "*.ex"
+  - "*.exs"
+  - "*.hs"
+  - "*.clj"
+  - "*.jl"
+  - "*.r"
+  - "*.vue"
+  - "*.svelte"
+  - "*.html"
+  - "Makefile"
+  - "Dockerfile"
+  - "Jenkinsfile"
+detect:
+  builtin: bidi_trojan_source
+remediation: >
+  Remove the control characters. Text that must be shown right to left
+  belongs in a translation file; where code needs a control character, write
+  it as an escape (`\u202E`) so reviewers can see it.
+references:
+  - https://trojansource.codes/
+  - https://www.cve.org/CVERecord?id=CVE-2021-42574
+tags: [hidden-unicode, trojan-source, code-review]
+examples:
+  match:
+    - "fn is_admin(role: &str) -> bool {\n    role == \"user\u202E \u2066// admin\u2069 \u2066\"\n}\n"
+    - path: src/auth.py
+      content: "if access_level != \"user\u202E \u2066# Check if admin\u2069 \u2066\":\n    grant()\n"
+    - path: web/app.js
+      content: "/*\u202E } \u2066if (isAdmin)\u2069 \u2066 begin admins only */\nconsole.log(\"ok\");\n"
+    - path: site/index.html
+      content: "<p>Download invoice_\u202Etxt.exe</p>\n"
+  nomatch:
+    - "fn main() {\n    println!(\"{} is written as an escape\", \"\\u{202E}\");\n}\n"
+    - path: site/index.html
+      content: "<p>\u05E9\u05DC\u05D5\u05DD \u2066agentkeep\u2069 \u05E2\u05D5\u05DC\u05DD</p>\n"
+    - path: src/i18n.py
+      content: "# \u05E9\u05DC\u05D5\u05DD: a Hebrew comment is fine\nGREETING = \"\u05E9\u05DC\u05D5\u05DD \u200F2.0\u200F\"\n"

@@ -732,7 +732,7 @@ impl StructuredDetector {
 
 /// Where each YAML document starts, if separators make that unambiguous;
 /// otherwise every document is searched from the top.
-fn yaml_doc_starts(text: &str, docs: usize) -> Vec<usize> {
+pub(crate) fn yaml_doc_starts(text: &str, docs: usize) -> Vec<usize> {
     if docs <= 1 {
         return vec![0; docs];
     }

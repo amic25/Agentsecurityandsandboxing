@@ -420,6 +420,37 @@ non-blocking experiment and is otherwise untested.
 - `shell_pattern` is a tolerant tokenizer, not a shell parser. Indirection
   (a variable holding the command name, `${IFS}`, aliases, functions) and
   pipes escaped inside Markdown table cells are not resolved.
+- `bidi_trojan_source` (rule `hidden-unicode/trojan-source`) picks the
+  language from the file extension or name and finds comments and strings
+  with a small lexer that does not know raw strings, heredocs, nested
+  comments or interpolation. In source files every bidi control is reported
+  regardless, so a lexer mistake only changes the wording. JSON, YAML,
+  Markdown and other text files are judged as prose: balanced embeddings
+  and isolates there are not reported, only unbalanced controls and
+  overrides that reverse visible text. Directional marks (LRM, RLM, ALM)
+  are never reported by this builtin.
+- `base64_command` (rule `risky-shell/base64-exec`) only sees base64 that
+  decodes to clean UTF-8 or UTF-16LE text in one piece. Other encodings
+  (hex, base32, compressed data, URL encoding), payloads split across
+  strings or built at run time, and blobs shorter than 16 characters are
+  not decoded. A decoded URL on its own is not reported when the decoded
+  text is JSON, when it is an XML namespace or schema, or when the blob is
+  the whole value of a key in a YAML, JSON, TOML, INI or `.env` file.
+- `ci_agent_token_exposure` (rule
+  `ci-workflow/agent-untrusted-trigger-write-token`) matches expressions,
+  it does not evaluate them: an `if:` that checks `author_association` or a
+  fixed actor counts as a gate even when another `||` branch lets anyone
+  through. Reusable workflows (`jobs.<id>.uses`), local and composite
+  actions, `workflow_run` and `workflow_call` triggers, and untrusted text
+  that arrives through `$GITHUB_EVENT_PATH`, artifacts or another job's
+  outputs are not followed. Agents are recognised by name. A job without
+  any `permissions` block is reported because the repository default may
+  grant write access; the scanner cannot read that setting.
+- `agentkeep_policy_loosening` (rule
+  `over-broad-permissions/agentkeep-policy-loosening`) has no public
+  suffix list, so wildcards over two-label suffixes (`*.co.uk`,
+  `*.github.io`) are not reported. Paths are compared as written: `/home`,
+  `/Users`, `..` and symlinks are not resolved.
 - `exfiltration/markdown-image-beacon` allowlists common badge hosts. Their
   dynamic-badge endpoints (for example `img.shields.io/endpoint?url=`) fetch
   other URLs, and those are not inspected.

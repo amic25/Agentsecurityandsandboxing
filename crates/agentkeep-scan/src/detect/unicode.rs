@@ -392,7 +392,7 @@ fn decode_tag(c: char) -> Option<char> {
 }
 
 /// `U+202E (RLO)` for the characters people ask about, `U+XXXX` otherwise.
-fn describe(c: char) -> String {
+pub(crate) fn describe(c: char) -> String {
     let name = match u32::from(c) {
         0x202A => "LRE",
         0x202B => "RLE",

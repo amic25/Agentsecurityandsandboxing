@@ -32,10 +32,35 @@ pub(crate) struct Builtin {
     pub(crate) build: BuildFn,
 }
 
-/// Every builtin this build knows. Phase 3 adds `bidi_trojan_source`,
-/// `base64_command`, `ci_agent_token_exposure` and
-/// `agentkeep_policy_loosening` here.
-const BUILTINS: &[Builtin] = &[];
+/// Every builtin this build knows.
+const BUILTINS: &[Builtin] = &[
+    Builtin {
+        name: "bidi_trojan_source",
+        build: super::bidi::build,
+    },
+    Builtin {
+        name: "base64_command",
+        build: super::base64::build,
+    },
+    Builtin {
+        name: "ci_agent_token_exposure",
+        build: super::ci_workflow::build,
+    },
+    Builtin {
+        name: "agentkeep_policy_loosening",
+        build: super::policy::build,
+    },
+];
+
+/// Option check for builtins that take none: `options` must be absent or an
+/// empty mapping, so a typo in a rule file is an error, not a silent no-op.
+pub(crate) fn no_options(options: Option<&Value>) -> Result<(), String> {
+    match options {
+        None | Some(Value::Null) => Ok(()),
+        Some(Value::Object(map)) if map.is_empty() => Ok(()),
+        Some(_) => Err("takes no options".into()),
+    }
+}
 
 fn registry() -> impl Iterator<Item = &'static Builtin> {
     let base = BUILTINS.iter();
@@ -136,7 +161,29 @@ pub(crate) mod tests {
     fn unknown_names_list_what_exists() {
         let e = compile("nope", None).unwrap_err();
         assert!(e.contains("unknown builtin `nope`"), "{e}");
+        for name in [
+            "bidi_trojan_source",
+            "base64_command",
+            "ci_agent_token_exposure",
+            "agentkeep_policy_loosening",
+        ] {
+            assert!(e.contains(name), "{e}");
+        }
         // The test-only builtin is never advertised.
         assert!(!e.contains("test_line_equals"), "{e}");
+    }
+
+    #[test]
+    fn every_registered_builtin_builds_without_options_and_rejects_unknown_ones() {
+        for b in BUILTINS {
+            assert!(compile(b.name, None).is_ok(), "{}", b.name);
+            assert!(
+                compile(b.name, Some(&serde_json::json!({}))).is_ok(),
+                "{}",
+                b.name
+            );
+            let e = compile(b.name, Some(&serde_json::json!({"nope": 1}))).unwrap_err();
+            assert!(e.contains(b.name) && e.contains("no options"), "{e}");
+        }
     }
 }

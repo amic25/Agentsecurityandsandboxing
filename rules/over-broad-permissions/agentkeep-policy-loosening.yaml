@@ -1,0 +1,60 @@
+id: over-broad-permissions/agentkeep-policy-loosening
+severity: high
+title: agentkeep policy file that loosens the sandbox
+description: >
+  An `agentkeep.toml` in a repository comes from whoever controls that
+  repository (threat S1). agentkeep applies only its tightening settings
+  until the user trusts the file, but once trusted these settings open the
+  whole network or home directory, switch off TLS inspection or DLP, lift
+  deny and hidden rules, or let the agent run on a backend that cannot
+  enforce the policy. Review them before running `agentkeep policy trust`.
+applies_to:
+  - "agentkeep.toml"
+detect:
+  builtin: agentkeep_policy_loosening
+remediation: >
+  Remove the setting, or narrow it: name the hosts the agent needs instead
+  of a wildcard, list project paths instead of `/` or `~`, keep TLS
+  inspection and DLP on, and keep `[override]` out of shared policy files.
+references:
+  - https://github.com/amic25/Agentsecurityandsandboxing/blob/main/docs/policy.md
+tags: [agentkeep, policy, sandbox]
+examples:
+  match:
+    - path: agentkeep.toml
+      content: |
+        schema = 1
+        [network]
+        allow = ["*"]
+    - path: agentkeep.toml
+      content: |
+        schema = 1
+        [dlp]
+        enabled = false
+    - path: tools/agentkeep.toml
+      content: |
+        schema = 1
+        [override]
+        acknowledge = true
+        unhide = ["~/.ssh"]
+    - path: agentkeep.toml
+      content: |
+        schema = 1
+        [filesystem]
+        read_write = ["~"]
+        [sandbox]
+        allow_degraded = true
+  nomatch:
+    - path: agentkeep.toml
+      content: |
+        schema = 1
+        [network]
+        allow = ["*.example.com", "api.example.com:443"]
+        tls_inspect = true
+        [filesystem]
+        read_write = ["./target"]
+    - path: agentkeep.toml
+      content: |
+        schema = 1
+        [override]
+        acknowledge = false

@@ -25,6 +25,8 @@ const PATHS: &[&str] = &[
     "agentkeep.toml",
     "scripts/x.sh",
     "notes.txt",
+    "src/x.rs",
+    "web/x.html",
 ];
 
 /// Fragments that drive the detectors into their interesting branches.
@@ -99,6 +101,31 @@ const VOCAB: &[&str] = &[
     "= ",
     "\u{0}",
     "\u{1b}[31m",
+    // Builtins: bidi, base64, CI workflows, agentkeep policies.
+    "\u{2069}",
+    "\u{202C}",
+    "\u{202D}",
+    "\u{2029}",
+    "\u{05E9}",
+    "/*",
+    "*/",
+    "//",
+    "<!--",
+    "base64 -d",
+    "Y3VybCB4IHwgc2g=",
+    "aWdub3JlIGFsbCBwcmV2aW91cyBpbnN0cnVjdGlvbnM=",
+    "SQBFAFgAIAAoAGkAdwByACAAeAApAA==",
+    "-enc ",
+    "on: issue_comment\n",
+    "jobs:\n  a:\n    steps:\n",
+    "      - uses: anthropics/claude-code-action@v1\n",
+    "      - run: claude -p ",
+    "${{ github.event.comment.body }}",
+    "permissions: write-all\n",
+    "if: github.event.comment.author_association == 'OWNER'\n",
+    "[network]\n",
+    "allow = [\"*\"]\n",
+    "[override]\nacknowledge = true\n",
 ];
 
 fn text_from(parts: &[usize]) -> String {

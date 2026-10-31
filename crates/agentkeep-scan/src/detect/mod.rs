@@ -9,8 +9,12 @@
 //! Every detector returns byte ranges into the file text. The engine turns
 //! them into positions, snippets and findings.
 
+pub(crate) mod base64;
+pub(crate) mod bidi;
 pub(crate) mod builtin;
+pub(crate) mod ci_workflow;
 pub(crate) mod markdown;
+pub(crate) mod policy;
 pub(crate) mod regex;
 pub(crate) mod shell;
 pub(crate) mod structured;
