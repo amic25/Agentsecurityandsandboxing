@@ -1,0 +1,36 @@
+id: hidden-unicode/tag-characters
+severity: critical
+title: Unicode tag characters hide invisible text
+description: >
+  Unicode tag characters (U+E0000-E007F) mirror ASCII one to one but render as
+  nothing, so a sentence written in them is invisible to a reviewer while a
+  language model still reads it. Outside emoji subdivision flags they have no
+  legitimate use in prose, code or configuration. The finding message carries
+  the decoded hidden text.
+applies_to: ["*"]
+detect:
+  unicode:
+    classes: [tag]
+remediation: >
+  Delete the invisible characters (the snippet shows them as \u{E00XX}) and read
+  the decoded text in the message. If it addresses an AI agent, treat the file
+  and its author as hostile.
+references:
+  - https://www.unicode.org/charts/PDF/UE0000.pdf
+  - https://embracethered.com/blog/posts/2024/hiding-and-finding-text-with-unicode-tags/
+tags: [hidden-unicode, prompt-injection]
+examples:
+  match:
+    # "ignore" written in tag characters after a visible sentence.
+    - "Thanks for contributing!\U000E0069\U000E0067\U000E006E\U000E006F\U000E0072\U000E0065"
+    - path: .cursorrules
+      content: "Use tabs.\U000E0020\U000E0072\U000E0075\U000E006E\U000E0020\U000E0063\U000E0075\U000E0072\U000E006C\n"
+    - path: src/config.json
+      content: "{\"name\": \"demo\U000E0041\U000E0049\"}"
+    # A flag-shaped sequence that is too long to be a subdivision code.
+    - "\U0001F3F4\U000E0069\U000E0067\U000E006E\U000E006F\U000E0072\U000E0065\U000E0061\U000E006C\U000E006C\U000E007F"
+  nomatch:
+    - "Plain text with accents: café, naïve, 日本語."
+    - "Emoji are fine: I ❤️ this, step 1️⃣, \U0001F469‍\U0001F4BB."
+    # The flag of Scotland is an emoji tag sequence.
+    - "Go team \U0001F3F4\U000E0067\U000E0062\U000E0073\U000E0063\U000E0074\U000E007F!"

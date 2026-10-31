@@ -401,6 +401,28 @@ non-blocking experiment and is otherwise untested.
   fixture corpus and published; both are below 1.0 by construction.
 - Instruction-like text aimed at agents is inherently ambiguous. Expect false
   positives in documentation that *describes* prompt injection.
+- Structured rules (`json_path`, `yaml_path`, `toml_path`) decide on the
+  parsed value, but the parsers keep no positions, so the reported line and
+  column are found by searching the text for the key path and the value. In
+  unusual layouts a finding can point at an earlier occurrence of the same
+  key or value.
+- The walker never follows symlinks, the scan root included. A symlinked
+  instruction file (`CLAUDE.md -> AGENTS.md`) is reported as skipped, and
+  its target is scanned only where it lives inside the root.
+- Files with a NUL byte in the first 8 KiB (UTF-16 text included) are
+  skipped as binary, and files that are mostly invalid UTF-8 are skipped as
+  `not-utf8`. Both are listed in the report's `skipped`, not scanned.
+- YAML that exceeds the parser budget (4 MiB, nesting depth 64, 250 000
+  nodes, bounded alias expansion) or does not parse is not evaluated by
+  YAML rules; the parse error is listed in the report's `errors`.
+- A rule reports at most 1 000 findings per file; the report says when it
+  stopped.
+- `shell_pattern` is a tolerant tokenizer, not a shell parser. Indirection
+  (a variable holding the command name, `${IFS}`, aliases, functions) and
+  pipes escaped inside Markdown table cells are not resolved.
+- `exfiltration/markdown-image-beacon` allowlists common badge hosts. Their
+  dynamic-badge endpoints (for example `img.shields.io/endpoint?url=`) fetch
+  other URLs, and those are not inspected.
 
 ## MCP gateway
 
